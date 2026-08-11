@@ -42,6 +42,7 @@ engines_col = db["engines"]
 types_col = db["maintenance_types"]
 records_col = db["maintenance_records"]
 users_col = db["users"]
+oil_analyses_col = db["oil_analyses"]
 
 
 def seed_if_empty():
@@ -389,24 +390,63 @@ def page_complete_maintenance(current_user):
     engine_names = sorted(engines.keys(), key=engine_sort_key)
     engine_name = st.selectbox("Motor", engine_names)
 
+    # Bu motor için zaten tanımlı olan bakım türleri
     eng_items = sorted([i for i in items if i["engine_id"] == engine_name], key=lambda i: i["remaining"])
-    if not eng_items:
-        st.info("Bu motor için tanımlı bakım türü yok.")
-        return
+    applicable_keys = {i["type_key"] for i in eng_items}
 
-    option_labels = [f"{i['type_label']} · {STATUS_LABELS[i['status']]} · {round(i['remaining'])} sa" for i in eng_items]
-    idx = st.selectbox("Bakım türü", range(len(eng_items)), format_func=lambda i: option_labels[i])
-    chosen = eng_items[idx]
+    # Excel'deki TÜM bakım türlerini göster — motor için henüz tanımlı olmayanlar
+    # da seçilebilir (seçildiğinde bu motor için yeni bir bakım takibi başlatılır).
+    all_types_sorted = sorted(types, key=lambda t: t["label"])
+    label_to_type = {}
+    for t in all_types_sorted:
+        if t["key"] in applicable_keys:
+            item = next(i for i in eng_items if i["type_key"] == t["key"])
+            label = f"{t['label']} · {STATUS_LABELS[item['status']]} · {round(item['remaining'])} sa"
+        else:
+            label = f"{t['label']} · ⚪ Bu motor için tanımlı değil"
+        label_to_type[label] = t
 
-    st.info(f"**{chosen['type_label']}** — Motor saati: {chosen['engine_hours']} · Son bakım: {chosen['last_hour']} · Periyot: {chosen['period']}")
+    chosen_label = st.selectbox("Bakım türü", list(label_to_type.keys()))
+    chosen_type = label_to_type[chosen_label]
+    chosen_key = chosen_type["key"]
+    is_new_for_engine = chosen_key not in applicable_keys
 
-    with st.form("bakim_tamamla"):
-        note = st.text_area("Ölçüm / açıklama (opsiyonel)")
-        photo = st.file_uploader("Fotoğraf ekle (opsiyonel)", type=["jpg", "jpeg", "png", "webp"])
-        camera_photo = st.camera_input("Ya da doğrudan fotoğraf çek (opsiyonel)")
-        submitted = st.form_submit_button("✅ Bakımı Tamamla", use_container_width=True, type="primary")
+    engine_hours_now = engines[engine_name]["hours"]
 
-    if submitted:
+    if is_new_for_engine:
+        st.warning(f"**{chosen_type['label']}**, {engine_name} için Excel'de tanımlı değildi. Bu kaydı eklersen bu motor için yeni bir bakım takibi başlatılır.")
+        period = st.number_input("Periyodik bakım saati (bu motor için)", min_value=1.0,
+                                  value=float(chosen_type["default_period_hours"]), step=100.0)
+        last_hour_before = 0.0
+    else:
+        chosen_item = next(i for i in eng_items if i["type_key"] == chosen_key)
+        period = chosen_item["period"]
+        last_hour_before = chosen_item["last_hour"]
+        st.info(f"**{chosen_type['label']}** — Motor saati: {engine_hours_now} · Son bakım: {last_hour_before} · Periyot: {period}")
+
+    st.markdown("---")
+    backdated = st.checkbox("📅 Geçmişe dönük kayıt (bu bakım geçmişte yapıldı, bugün değil)")
+    if backdated:
+        col1, col2 = st.columns(2)
+        with col1:
+            record_date = st.date_input("Bakımın yapıldığı tarih", value=date.today(), max_value=date.today())
+        with col2:
+            record_hours = st.number_input("O tarihteki motor çalışma saati", min_value=0.0,
+                                            value=float(engine_hours_now), step=1.0)
+    else:
+        record_date = date.today()
+        record_hours = engine_hours_now
+
+    # Karter fark basıncı — krankcase filtresi ve intercooler bakımlarında ölçülür
+    pressure_reading = None
+    if chosen_key in ("krank", "intercooler"):
+        pressure_reading = st.number_input("Fark Basıncı (bar)", min_value=0.0, step=0.1, format="%.2f")
+
+    note = st.text_area("Ölçüm / açıklama (opsiyonel)")
+    photo = st.file_uploader("Fotoğraf ekle (opsiyonel)", type=["jpg", "jpeg", "png", "webp"])
+    camera_photo = st.camera_input("Ya da doğrudan fotoğraf çek (opsiyonel)")
+
+    if st.button("✅ Bakımı Tamamla", use_container_width=True, type="primary"):
         photo_b64 = None
         chosen_photo = camera_photo or photo
         if chosen_photo is not None:
@@ -415,22 +455,38 @@ def page_complete_maintenance(current_user):
             except Exception:
                 st.warning("Fotoğraf işlenemedi, kayıt fotoğrafsız kaydedildi.")
 
-        engine_hours = engines[engine_name]["hours"]
-        records_col.insert_one({
+        record_datetime = datetime.combine(record_date, datetime.now().time())
+        record = {
             "engine_id": engine_name, "engine_name": engine_name,
-            "type_key": chosen["type_key"], "type_label": chosen["type_label"],
-            "hour_at_completion": engine_hours, "note": note, "photo_b64": photo_b64,
+            "type_key": chosen_key, "type_label": chosen_type["label"],
+            "hour_at_completion": record_hours, "note": note, "photo_b64": photo_b64,
             "technician_id": current_user["_id"], "technician_name": current_user["full_name"],
-            "created_at": datetime.utcnow(),
-        })
+            "created_at": record_datetime, "backdated": backdated,
+        }
+        if pressure_reading is not None:
+            record["pressure_reading"] = pressure_reading
+        records_col.insert_one(record)
 
-        if chosen["type_key"] == "oil":
-            types_col.update_one({"_id": "oil"}, {"$set": {f"engine_states.{engine_name}.last_maintenance_hour": engine_hours}})
-        else:
-            types_col.update_one({"_id": chosen["type_key"]}, {"$set": {f"engine_states.{engine_name}.last_maintenance_hour": engine_hours}})
+        # 'Son bakım saati'ni yalnızca bu kayıt, o tür için bilinen en güncel
+        # bakım ise güncelle — geçmişe dönük eski bir kayıt, daha yeni bir
+        # bakımın üzerine yanlışlıkla yazmasın.
+        if record_hours >= last_hour_before:
+            types_col.update_one(
+                {"_id": chosen_key},
+                {"$set": {f"engine_states.{engine_name}.last_maintenance_hour": record_hours,
+                          f"engine_states.{engine_name}.period_hours": period}},
+                upsert=True,
+            )
+        elif is_new_for_engine:
+            types_col.update_one(
+                {"_id": chosen_key},
+                {"$set": {f"engine_states.{engine_name}.last_maintenance_hour": record_hours,
+                          f"engine_states.{engine_name}.period_hours": period}},
+                upsert=True,
+            )
 
         st.cache_data.clear()
-        st.success(f"{chosen['type_label']} bakımı {engine_name} için tamamlandı olarak kaydedildi.")
+        st.success(f"{chosen_type['label']} bakımı {engine_name} için kaydedildi.")
         st.rerun()
 
 
@@ -451,8 +507,13 @@ def page_records():
             else:
                 info_col = st.container()
             with info_col:
-                st.markdown(f"**{r['type_label']}** · {r['engine_name']}")
+                title = f"**{r['type_label']}** · {r['engine_name']}"
+                if r.get("backdated"):
+                    title += " · 📅 geçmişe dönük"
+                st.markdown(title)
                 st.caption(f"{r['created_at'].strftime('%d.%m.%Y')} · {r['hour_at_completion']} sa okumasında · {r.get('technician_name','')}")
+                if r.get("pressure_reading") is not None:
+                    st.caption(f"📈 Fark Basıncı: {r['pressure_reading']} bar")
                 if r.get("note"):
                     st.caption(f"📝 {r['note']}")
 
@@ -588,6 +649,62 @@ def page_export():
             st.success(f"{updated} motor için çalışma saati güncellendi.")
 
 
+def page_oil_analyses(current_user):
+    st.markdown("### Yağ Analizleri (Laboratuvar Raporları)")
+    st.caption("Laboratuvarda yapılan yağ analizi PDF raporlarını motor bazında saklayın.")
+
+    engines = sorted(engines_col.find(), key=lambda e: engine_sort_key(e["name"]))
+    engine_names = [e["name"] for e in engines]
+
+    if current_user["role"] != "goruntuleyici":
+        with st.expander("➕ Yeni analiz raporu ekle", expanded=False):
+            engine_name = st.selectbox("Motor", engine_names, key="oil_pdf_engine")
+            analysis_date = st.date_input("Numune / analiz tarihi", value=date.today(), max_value=date.today())
+            result = st.selectbox("Genel değerlendirme", ["İyi", "Dikkat", "Kötü"], key="oil_pdf_result")
+            note = st.text_area("Not (opsiyonel)", key="oil_pdf_note")
+            pdf_file = st.file_uploader("PDF raporu", type=["pdf"], key="oil_pdf_file")
+
+            if st.button("Raporu Kaydet", type="primary"):
+                if pdf_file is None:
+                    st.error("Lütfen bir PDF dosyası seçin.")
+                elif pdf_file.size > 10 * 1024 * 1024:
+                    st.error("Dosya 10MB sınırını aşıyor. Daha küçük bir dosya deneyin.")
+                else:
+                    pdf_b64 = base64.b64encode(pdf_file.read()).decode("utf-8")
+                    oil_analyses_col.insert_one({
+                        "engine_id": engine_name, "engine_name": engine_name,
+                        "analysis_date": datetime.combine(analysis_date, datetime.min.time()),
+                        "result": result, "note": note, "pdf_b64": pdf_b64, "pdf_filename": pdf_file.name,
+                        "uploaded_by": current_user["full_name"], "created_at": datetime.utcnow(),
+                    })
+                    st.success(f"{engine_name} için analiz raporu kaydedildi.")
+                    st.rerun()
+
+    st.markdown("---")
+    filter_engine = st.selectbox("Motora göre filtrele", ["Tümü"] + engine_names, key="oil_pdf_filter")
+    query = {} if filter_engine == "Tümü" else {"engine_id": filter_engine}
+    analyses = list(oil_analyses_col.find(query).sort("analysis_date", -1))
+
+    if not analyses:
+        st.info("Henüz analiz raporu eklenmemiş.")
+        return
+
+    result_icons = {"İyi": "🟢", "Dikkat": "🟡", "Kötü": "🔴"}
+    for a in analyses:
+        with st.container(border=True):
+            c1, c2 = st.columns([4, 1])
+            with c1:
+                st.markdown(f"**{a['engine_name']}** · {result_icons.get(a.get('result',''), '')} {a.get('result','')}")
+                st.caption(f"Analiz tarihi: {a['analysis_date'].strftime('%d.%m.%Y')} · Yükleyen: {a.get('uploaded_by','')}")
+                if a.get("note"):
+                    st.caption(f"📝 {a['note']}")
+            with c2:
+                if a.get("pdf_b64"):
+                    st.download_button("📄 PDF İndir", base64.b64decode(a["pdf_b64"]),
+                                        file_name=a.get("pdf_filename", "analiz.pdf"),
+                                        mime="application/pdf", key=f"dl_{a['_id']}")
+
+
 def page_users(current_user):
     if current_user["role"] != "yonetici":
         st.warning("Bu sayfa yalnızca yöneticiler içindir.")
@@ -629,7 +746,8 @@ else:
         st.divider()
 
         pages = ["📊 Özet", "⏱️ Saat Güncelle", "⚙️ Motorlar", "🔧 Bakım Türleri",
-                 "✅ Bakım Tamamla", "📜 Bakım Kayıtları", "📈 Saat Geçmişi", "📊 Bakım Aralıkları", "📥 Excel"]
+                 "✅ Bakım Tamamla", "🧪 Yağ Analizleri", "📜 Bakım Kayıtları",
+                 "📈 Saat Geçmişi", "📊 Bakım Aralıkları", "📥 Excel"]
         if user["role"] == "yonetici":
             pages.append("👥 Kullanıcılar")
         choice = st.radio("Menü", pages, label_visibility="collapsed")
@@ -647,6 +765,8 @@ else:
         page_types()
     elif choice == "✅ Bakım Tamamla":
         page_complete_maintenance(user)
+    elif choice == "🧪 Yağ Analizleri":
+        page_oil_analyses(user)
     elif choice == "📜 Bakım Kayıtları":
         page_records()
     elif choice == "📈 Saat Geçmişi":
