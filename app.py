@@ -45,35 +45,46 @@ users_col = db["users"]
 
 
 def seed_if_empty():
-    """Veritabanı tamamen boşsa, V10 dosyasından çıkarılan gerçek verilerle doldurur."""
-    if engines_col.count_documents({}) > 0:
-        return
+    """
+    Veritabanı boşsa (veya önceki bir deneme yarıda kalmışsa) V10 dosyasından
+    çıkarılan gerçek verilerle doldurur. 'upsert' kullanır — aynı anda iki kez
+    tetiklense veya kısmen daha önce çalışmış olsa bile hata vermez.
+    """
     seed_path = os.path.join(os.path.dirname(__file__), "seed_data.json")
     with open(seed_path, encoding="utf-8") as f:
         data = json.load(f)
 
-    now = datetime.utcnow()
-    docs = []
-    for name, info in data["engines"].items():
-        docs.append({
-            "_id": name, "name": name, "hours": info["hours"], "load_kw": info.get("load", 0),
-            "updated_at": now, "history": [{"date": now.isoformat(), "hours": info["hours"]}],
-        })
-    engines_col.insert_many(docs)
+    if engines_col.count_documents({}) < len(data["engines"]):
+        now = datetime.utcnow()
+        for name, info in data["engines"].items():
+            engines_col.update_one(
+                {"_id": name},
+                {"$setOnInsert": {
+                    "name": name, "hours": info["hours"], "load_kw": info.get("load", 0),
+                    "updated_at": now, "history": [{"date": now.isoformat(), "hours": info["hours"]}],
+                }},
+                upsert=True,
+            )
 
-    type_docs = []
-    oil_states = {name: {"last_maintenance_hour": rec["changeHour"], "period_hours": rec["maxHours"]}
-                  for name, rec in data["oil"].items()}
-    type_docs.append({"_id": "oil", "key": "oil", "label": "Yağ Değişimi",
-                       "default_period_hours": 700, "engine_states": oil_states})
-
-    for mt in data["maintTypes"]:
-        states = {name: {"last_maintenance_hour": rec["lastHour"], "period_hours": rec["period"]}
-                  for name, rec in mt["perEngine"].items()}
-        default_period = next(iter(states.values()))["period_hours"] if states else 0
-        type_docs.append({"_id": mt["key"], "key": mt["key"], "label": mt["label"],
-                           "default_period_hours": default_period, "engine_states": states})
-    types_col.insert_many(type_docs)
+    expected_type_count = 1 + len(data["maintTypes"])  # +1 = yağ
+    if types_col.count_documents({}) < expected_type_count:
+        oil_states = {name: {"last_maintenance_hour": rec["changeHour"], "period_hours": rec["maxHours"]}
+                      for name, rec in data["oil"].items()}
+        types_col.update_one(
+            {"_id": "oil"},
+            {"$setOnInsert": {"key": "oil", "label": "Yağ Değişimi", "default_period_hours": 700, "engine_states": oil_states}},
+            upsert=True,
+        )
+        for mt in data["maintTypes"]:
+            states = {name: {"last_maintenance_hour": rec["lastHour"], "period_hours": rec["period"]}
+                      for name, rec in mt["perEngine"].items()}
+            default_period = next(iter(states.values()))["period_hours"] if states else 0
+            types_col.update_one(
+                {"_id": mt["key"]},
+                {"$setOnInsert": {"key": mt["key"], "label": mt["label"],
+                                   "default_period_hours": default_period, "engine_states": states}},
+                upsert=True,
+            )
 
 
 seed_if_empty()
