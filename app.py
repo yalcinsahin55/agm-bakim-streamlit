@@ -588,7 +588,7 @@ def page_complete_maintenance(current_user):
 
     record_hours = st.number_input(
         "O anki motor çalışma saati", min_value=0.0, value=float(engine_hours_now), step=1.0,
-        help="Bakımın yapıldığı andaki motor çalışma saatini girin. Geçmişe dönük olmayan kayıtlarda bu değer motorun güncel çalışma saatine de yazılır."
+        help="Bakımın yapıldığı andaki motor çalışma saatini girin. Bu değer motorun güncel çalışma saatinden BÜYÜKSE motorun güncel saati de bu değere güncellenir; küçük veya eşitse yalnızca bu bakım kaydına yazılır."
     )
 
     # Karter fark basıncı — krankcase filtresi ve intercooler bakımlarında ölçülür
@@ -635,9 +635,12 @@ def page_complete_maintenance(current_user):
         )
         recompute_last_maintenance(engine_name, chosen_key)
 
-        # Geçmişe dönük olmayan kayıtlarda, girilen saat motorun GÜNCEL çalışma
-        # saatini de günceller (bu ekrandan hem bakım hem motor saati tek seferde girilebilsin diye).
-        if not backdated and record_hours != engine_hours_now:
+        # Girilen saat, motorun GÜNCEL çalışma saatinden büyükse motorun güncel
+        # saatini de bu değere günceller (daha yeni bir bilgi). Küçük veya eşitse
+        # motorun güncel saatine dokunmaz, yalnızca bu bakım kaydına yazılır —
+        # böylece geçmişe dönük ya da eski bir saat girişi güncel saati geri
+        # düşürmez.
+        if record_hours > engine_hours_now:
             update_engine_hours(engine_name, record_hours)
 
         st.cache_data.clear()
@@ -768,9 +771,10 @@ def edit_maintenance_record(r, current_photos):
         # tüm kayıtlardan yeniden hesapla.
         if new_hours != r["hour_at_completion"]:
             recompute_last_maintenance(r["engine_id"], r["type_key"])
-            # Geçmişe dönük olmayan bir kaydın saati düzeltildiyse, motorun
-            # güncel çalışma saatini de aynı değere güncelle.
-            if not r.get("backdated"):
+            # Yeni saat, motorun GÜNCEL çalışma saatinden büyükse motorun güncel
+            # saatini de günceller. Küçük veya eşitse dokunmaz.
+            current_engine = engines_col.find_one({"_id": r["engine_id"]})
+            if current_engine and new_hours > current_engine["hours"]:
                 update_engine_hours(r["engine_id"], new_hours)
 
         st.session_state[f"edit_{r['_id']}"] = False
