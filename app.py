@@ -602,6 +602,15 @@ def page_complete_maintenance(current_user):
                                type=["jpg", "jpeg", "png", "webp"], accept_multiple_files=True)
     camera_photo = st.camera_input("Ya da doğrudan fotoğraf çek (opsiyonel)")
 
+    st.markdown("---")
+    other_items = [i for i in eng_items if i["type_key"] != chosen_key]
+    extra_selected = []
+    if other_items:
+        st.caption("Bazen bir bakımı yaparken diğerlerini de yapmış oluyorsunuz (örn. siloksan temizliğiyle birlikte intercooler/yağ). Bu bakımla birlikte tamamlanan başka bakımlar varsa işaretleyin — hepsi aynı saat ve tarihle kaydedilir.")
+        extra_labels = {f"{i['type_label']} · {STATUS_LABELS[i['status']]} · {round(i['remaining'])} sa": i for i in other_items}
+        picked = st.multiselect("Bu bakımla birlikte tamamlanan diğer bakımlar (opsiyonel)", list(extra_labels.keys()))
+        extra_selected = [extra_labels[p] for p in picked]
+
     if st.button("✅ Bakımı Tamamla", use_container_width=True, type="primary"):
         photos_b64 = []
         all_photos = list(photos) if photos else []
@@ -635,6 +644,23 @@ def page_complete_maintenance(current_user):
         )
         recompute_last_maintenance(engine_name, chosen_key)
 
+        # Aynı anda tamamlandığı işaretlenen diğer bakımlar için de aynı saat/tarih/
+        # teknisyen ile ayrı kayıtlar oluştur.
+        completed_labels = [chosen_type["label"]]
+        for extra in extra_selected:
+            extra_record = {
+                "engine_id": engine_name, "engine_name": engine_name,
+                "type_key": extra["type_key"], "type_label": extra["type_label"],
+                "hour_at_completion": record_hours, "note": note, "technician_note": tech_note,
+                "photos_b64": photos_b64,
+                "technician_id": current_user["_id"], "technician_name": current_user["full_name"],
+                "created_at": record_datetime, "backdated": backdated,
+                "grouped_with": chosen_type["label"],
+            }
+            records_col.insert_one(extra_record)
+            recompute_last_maintenance(engine_name, extra["type_key"])
+            completed_labels.append(extra["type_label"])
+
         # Girilen saat, motorun GÜNCEL çalışma saatinden büyükse motorun güncel
         # saatini de bu değere günceller (daha yeni bir bilgi). Küçük veya eşitse
         # motorun güncel saatine dokunmaz, yalnızca bu bakım kaydına yazılır —
@@ -644,7 +670,7 @@ def page_complete_maintenance(current_user):
             update_engine_hours(engine_name, record_hours)
 
         st.cache_data.clear()
-        st.success(f"{chosen_type['label']} bakımı {engine_name} için kaydedildi.")
+        st.success(f"{', '.join(completed_labels)} bakımı {engine_name} için kaydedildi.")
         st.rerun()
 
 
@@ -1257,6 +1283,45 @@ def import_equipment_excel(uploaded_file):
     return updated
 
 
+def page_maintenance_type_admin(current_user):
+    if current_user["role"] != "yonetici":
+        st.warning("Bu sayfa yalnızca yöneticiler içindir.")
+        return
+    st.markdown("### Bakım Türü Yönetimi")
+    st.caption("Artık takip edilmesini istemediğiniz bir bakım türünü, o türe ait tüm geçmiş kayıtlarıyla birlikte kalıcı olarak silebilirsiniz. Bu işlem geri alınamaz.")
+
+    all_types = sorted(types_col.find(), key=lambda t: t["label"])
+    if not all_types:
+        st.info("Tanımlı bakım türü yok.")
+        return
+
+    for t in all_types:
+        record_count = records_col.count_documents({"type_key": t["key"]})
+        engine_count = len(t.get("engine_states", {}))
+        with st.container(border=True):
+            c1, c2 = st.columns([4, 1])
+            with c1:
+                st.markdown(f"**{t['label']}**")
+                st.caption(f"{engine_count} motorda tanımlı · {record_count} bakım kaydı")
+            with c2:
+                confirm_key = f"confirm_del_type_{t['_id']}"
+                if st.session_state.get(confirm_key):
+                    if st.button("⚠️ Emin misiniz?", key=f"sure_{t['_id']}", type="primary", use_container_width=True):
+                        records_col.delete_many({"type_key": t["key"]})
+                        types_col.delete_one({"_id": t["_id"]})
+                        st.session_state[confirm_key] = False
+                        st.cache_data.clear()
+                        st.success(f"{t['label']} ve tüm kayıtları silindi.")
+                        st.rerun()
+                    if st.button("Vazgeç", key=f"cancel_del_type_{t['_id']}", use_container_width=True):
+                        st.session_state[confirm_key] = False
+                        st.rerun()
+                else:
+                    if st.button("🗑️ Sil", key=f"del_type_{t['_id']}", use_container_width=True):
+                        st.session_state[confirm_key] = True
+                        st.rerun()
+
+
 def page_users(current_user):
     if current_user["role"] != "yonetici":
         st.warning("Bu sayfa yalnızca yöneticiler içindir.")
@@ -1303,6 +1368,7 @@ else:
                  "📈 Saat Geçmişi", "📊 Bakım Aralıkları", "📥 Excel"]
         if user["role"] == "yonetici":
             pages.append("👥 Kullanıcılar")
+            pages.append("🗑️ Bakım Türü Yönetimi")
         choice = st.radio("Menü", pages, label_visibility="collapsed")
 
     if choice == "📊 Özet":
@@ -1336,3 +1402,5 @@ else:
         page_export()
     elif choice == "👥 Kullanıcılar":
         page_users(user)
+    elif choice == "🗑️ Bakım Türü Yönetimi":
+        page_maintenance_type_admin(user)
