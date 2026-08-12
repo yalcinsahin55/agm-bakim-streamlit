@@ -322,6 +322,21 @@ def page_dashboard():
             st.dataframe(breakdown_df, use_container_width=True, hide_index=True,
                          height=min(35 * (len(breakdown_df) + 1) + 3, 500))
 
+            type_labels = [label for label, _ in rows]
+            detail_choice = st.selectbox("Hangi bakım türünün motorlarını görmek istersiniz?",
+                                          ["Seçiniz..."] + type_labels, key=f"detail_{status_key}")
+            if detail_choice != "Seçiniz...":
+                detail_items = sorted(by_type[detail_choice], key=lambda i: i["remaining"])
+                value_col = "Gecikme (Saat)" if status_key == "gecikmis" else "Kalan Saat"
+                detail_df = pd.DataFrame([{
+                    "Motor": i["engine_name"], "Motor Saati": i["engine_hours"],
+                    "Son Bakım Saati": i["last_hour"],
+                    "Bakımdan Sonra Çalışılan": round(i["engine_hours"] - i["last_hour"], 1),
+                    value_col: round(abs(i["remaining"]), 1),
+                } for i in detail_items])
+                st.dataframe(detail_df, use_container_width=True, hide_index=True,
+                             height=min(35 * (len(detail_df) + 1) + 3, 900))
+
     normal_count = len([i for i in items if i["status"] == "normal"])
     st.caption(f"🟢 Normal: {normal_count} bakım kaydı")
 
