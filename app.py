@@ -9,7 +9,7 @@ import hashlib
 import io
 import json
 import os
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 
 import pandas as pd
 import pymongo
@@ -176,6 +176,29 @@ def engine_sort_key(name):
     return int(digits) if digits else 0
 
 
+def estimate_daily_usage(engine_doc):
+    """Motorun geçmiş çalışma saati kayıtlarından günlük ortalama kullanım (saat/gün) hesaplar."""
+    if not engine_doc:
+        return None
+    history = engine_doc.get("history", [])
+    if len(history) < 2:
+        return None
+    try:
+        history_sorted = sorted(history, key=lambda h: h["date"])
+        first, last = history_sorted[0], history_sorted[-1]
+        first_dt = datetime.fromisoformat(first["date"])
+        last_dt = datetime.fromisoformat(last["date"])
+        span_days = (last_dt - first_dt).total_seconds() / 86400
+        if span_days < 0.5:
+            return None
+        delta_hours = last["hours"] - first["hours"]
+        if delta_hours <= 0:
+            return None
+        return delta_hours / span_days
+    except Exception:
+        return None
+
+
 def delete_button(collection, doc_id, key_suffix, current_user, owner_id=None):
     """Silme yetkisi: yönetici/planlamacı her kaydı, diğer roller yalnızca
     kendi oluşturdukları kaydı silebilir. İki adımlı onay ister."""
@@ -340,32 +363,41 @@ def page_dashboard():
 
 
 def page_hours_update():
-    st.markdown("### Motor Çalışma Saatlerini Güncelle")
+    st.markdown("### Motor Çalışma Saatlerini / Yüklerini Güncelle")
     st.caption("Bu ekrandan güncellediğiniz saatler, tüm bakım türlerindeki kalan süreleri otomatik olarak yeniden hesaplar.")
 
     engines = sorted(engines_col.find(), key=lambda e: engine_sort_key(e["name"]))
     with st.form("saat_guncelle"):
-        new_values = {}
-        cols = st.columns(3)
-        for idx, e in enumerate(engines):
-            with cols[idx % 3]:
-                new_values[e["_id"]] = st.number_input(e["name"], value=float(e["hours"]), step=1.0, key=f"hr_{e['_id']}")
+        new_hours = {}
+        new_loads = {}
+        for e in engines:
+            c1, c2 = st.columns(2)
+            new_hours[e["_id"]] = c1.number_input(f"{e['name']} — Saat", value=float(e["hours"]), step=1.0, key=f"hr_{e['_id']}")
+            new_loads[e["_id"]] = c2.number_input(f"{e['name']} — Yük (kW)", value=float(e.get("load_kw", 0)), step=10.0, key=f"ld_{e['_id']}")
         submitted = st.form_submit_button("💾 Kaydet", use_container_width=True, type="primary")
 
     if submitted:
         stamp = datetime.utcnow()
         changed = 0
         for e in engines:
-            new_val = new_values[e["_id"]]
-            if new_val != e["hours"]:
-                engines_col.update_one(
-                    {"_id": e["_id"]},
-                    {"$set": {"hours": new_val, "updated_at": stamp},
-                     "$push": {"history": {"date": stamp.isoformat(), "hours": new_val}}},
-                )
+            new_h = new_hours[e["_id"]]
+            new_l = new_loads[e["_id"]]
+            set_fields = {}
+            push_history = False
+            if new_h != e["hours"]:
+                set_fields["hours"] = new_h
+                push_history = True
+            if new_l != e.get("load_kw", 0):
+                set_fields["load_kw"] = new_l
+            if set_fields:
+                set_fields["updated_at"] = stamp
+                update_op = {"$set": set_fields}
+                if push_history:
+                    update_op["$push"] = {"history": {"date": stamp.isoformat(), "hours": new_h}}
+                engines_col.update_one({"_id": e["_id"]}, update_op)
                 changed += 1
         st.cache_data.clear()
-        st.success(f"{changed} motor için çalışma saati güncellendi." if changed else "Değişiklik yapılmadı.")
+        st.success(f"{changed} motor güncellendi." if changed else "Değişiklik yapılmadı.")
 
 
 def page_engines():
@@ -609,7 +641,108 @@ def page_records(current_user):
                     st.caption(f"📝 {r['note']}")
                 if r.get("technician_note"):
                     st.caption(f"🗒️ Bakımcı Notu: {r['technician_note']}")
-                delete_button(records_col, r["_id"], f"rec_{r['_id']}", current_user, owner_id=r.get("technician_id"))
+
+                can_edit = current_user["role"] in ("yonetici", "planlamaci") or current_user["_id"] == r.get("technician_id")
+                bc1, bc2 = st.columns(2)
+                if can_edit:
+                    with bc1:
+                        if st.button("✏️ Düzenle", key=f"editbtn_{r['_id']}"):
+                            st.session_state[f"edit_{r['_id']}"] = not st.session_state.get(f"edit_{r['_id']}", False)
+                            st.rerun()
+                with bc2:
+                    delete_button(records_col, r["_id"], f"rec_{r['_id']}", current_user, owner_id=r.get("technician_id"))
+
+                if can_edit and st.session_state.get(f"edit_{r['_id']}"):
+                    edit_maintenance_record(r, photos)
+
+
+def edit_maintenance_record(r, current_photos):
+    st.markdown("---")
+    st.caption("Düzenleme modu")
+    new_note = st.text_area("Ölçüm / Teknik Açıklama", value=r.get("note", ""), key=f"ed_note_{r['_id']}")
+    new_tech_note = st.text_area("Bakımcı Notu", value=r.get("technician_note", ""), key=f"ed_tnote_{r['_id']}")
+    new_pressure = None
+    if r.get("type_key") in ("krank", "intercooler") or r.get("pressure_reading") is not None:
+        new_pressure = st.number_input("Fark Basıncı (bar)", value=float(r.get("pressure_reading") or 0.0),
+                                        step=0.1, format="%.2f", key=f"ed_press_{r['_id']}")
+
+    keep_photos = list(current_photos)
+    if current_photos:
+        st.caption("Mevcut fotoğraflar — kaldırmak istediklerinizi işaretleyin")
+        remove_flags = []
+        cols = st.columns(min(len(current_photos), 4))
+        for idx, p in enumerate(current_photos):
+            with cols[idx % len(cols)]:
+                st.image(base64.b64decode(p), use_container_width=True)
+                remove_flags.append(st.checkbox("Kaldır", key=f"ed_rm_{r['_id']}_{idx}"))
+        keep_photos = [p for p, rm in zip(current_photos, remove_flags) if not rm]
+
+    new_photos = st.file_uploader("Yeni fotoğraf ekle (opsiyonel, birden fazla seçebilirsiniz)",
+                                   type=["jpg", "jpeg", "png", "webp"], accept_multiple_files=True,
+                                   key=f"ed_upload_{r['_id']}")
+    new_camera = st.camera_input("Ya da doğrudan fotoğraf çek", key=f"ed_camera_{r['_id']}")
+
+    c1, c2 = st.columns(2)
+    if c1.button("Vazgeç", key=f"ed_cancel_{r['_id']}", use_container_width=True):
+        st.session_state[f"edit_{r['_id']}"] = False
+        st.rerun()
+    if c2.button("💾 Kaydet", key=f"ed_save_{r['_id']}", type="primary", use_container_width=True):
+        added_photos = []
+        all_new = list(new_photos) if new_photos else []
+        if new_camera is not None:
+            all_new.append(new_camera)
+        for p in all_new:
+            try:
+                added_photos.append(compress_photo(p))
+            except Exception:
+                st.warning("Bir fotoğraf işlenemedi, atlandı.")
+
+        update = {"note": new_note, "technician_note": new_tech_note, "photos_b64": keep_photos + added_photos}
+        if new_pressure is not None:
+            update["pressure_reading"] = new_pressure
+        records_col.update_one({"_id": r["_id"]}, {"$set": update})
+        st.session_state[f"edit_{r['_id']}"] = False
+        st.cache_data.clear()
+        st.success("Kayıt güncellendi.")
+        st.rerun()
+
+
+def page_maintenance_forecast():
+    items, engines, types = build_items()
+    st.markdown("### Bakım Tarihi Tahmini")
+    st.caption("Motorun geçmiş çalışma saati kayıtlarından günlük ortalama kullanım hesaplanır; bu hıza göre bakımın hangi takvim tarihinde geleceği tahmin edilir. En az iki farklı tarihte saat kaydı olan motorlar için tahmin yapılabilir.")
+
+    type_options = ["Tümü"] + sorted({i["type_label"] for i in items})
+    type_choice = st.selectbox("Bakım türü seç", type_options, key="forecast_type")
+
+    rows = items if type_choice == "Tümü" else [i for i in items if i["type_label"] == type_choice]
+    if not rows:
+        st.info("Kayıt bulunamadı.")
+        return
+
+    forecast_rows = []
+    for r in rows:
+        engine_doc = engines.get(r["engine_id"])
+        daily = estimate_daily_usage(engine_doc)
+        if daily and daily > 0:
+            days_left = r["remaining"] / daily
+            est_date = date.today() + timedelta(days=days_left)
+            est_date_str = est_date.strftime("%d.%m.%Y")
+            sort_key = days_left
+        else:
+            est_date_str = "Tahmin edilemiyor (yetersiz veri)"
+            sort_key = 10**9
+        forecast_rows.append({
+            "Motor": r["engine_name"], "Bakım Türü": r["type_label"],
+            "Kalan Saat": round(r["remaining"], 1),
+            "Günlük Ort. Kullanım (sa)": round(daily, 1) if daily else "-",
+            "Tahmini Bakım Tarihi": est_date_str, "Durum": STATUS_LABELS[r["status"]],
+            "_sort": sort_key,
+        })
+    forecast_rows.sort(key=lambda r: r["_sort"])
+    df = pd.DataFrame(forecast_rows).drop(columns=["_sort"])
+    height = min(35 * (len(df) + 1) + 3, 1600)
+    st.dataframe(df, use_container_width=True, hide_index=True, height=height)
 
 
 def page_hours_history():
@@ -714,30 +847,39 @@ def page_export():
                             file_name=f"AGM_Motor_Bakim_Raporu_{date.today().isoformat()}.xlsx",
                             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
-    st.markdown("#### 📥 Motor Saatlerini İçe Aktar")
-    st.caption("'MOTOR' ve 'MOTOR ÇALIŞMA SAATİ' sütunlarını içeren bir Excel dosyası yükleyin.")
+    st.markdown("#### 📥 Motor Saatlerini / Yüklerini İçe Aktar")
+    st.caption("'MOTOR' ve 'MOTOR ÇALIŞMA SAATİ' sütunlarını içeren bir Excel dosyası yükleyin. Dosyada ayrıca 'YÜK' (kW) sütunu varsa, motor yükleri de aynı anda güncellenir.")
     up = st.file_uploader("Excel dosyası seç", type=["xlsx", "xls"], key="import_file")
     if up is not None and st.button("İçe aktar"):
         df = pd.read_excel(up)
         cols = {c.upper(): c for c in df.columns}
         name_col = next((v for k, v in cols.items() if "MOTOR" in k and "SAAT" not in k and "YÜK" not in k), None)
         hour_col = next((v for k, v in cols.items() if "SAAT" in k), None)
+        load_col = next((v for k, v in cols.items() if "YÜK" in k), None)
         if not name_col or not hour_col:
             st.error("MOTOR ve MOTOR ÇALIŞMA SAATİ sütunları bulunamadı.")
         else:
             stamp = datetime.utcnow()
             updated = 0
             for _, row in df.iterrows():
-                name, hours = str(row[name_col]).strip(), row[hour_col]
-                if pd.isna(hours):
-                    continue
+                name = str(row[name_col]).strip()
+                hours = row[hour_col]
+                load_val = row[load_col] if load_col else None
                 existing = engines_col.find_one({"_id": name})
-                if existing and float(hours) != existing["hours"]:
-                    engines_col.update_one(
-                        {"_id": name},
-                        {"$set": {"hours": float(hours), "updated_at": stamp},
-                         "$push": {"history": {"date": stamp.isoformat(), "hours": float(hours)}}},
-                    )
+                if not existing:
+                    continue
+                set_fields = {"updated_at": stamp}
+                push_history = False
+                if not pd.isna(hours) and float(hours) != existing["hours"]:
+                    set_fields["hours"] = float(hours)
+                    push_history = True
+                if load_col is not None and not pd.isna(load_val):
+                    set_fields["load_kw"] = float(load_val)
+                if len(set_fields) > 1:
+                    update_op = {"$set": set_fields}
+                    if push_history:
+                        update_op["$push"] = {"history": {"date": stamp.isoformat(), "hours": float(hours)}}
+                    engines_col.update_one({"_id": name}, update_op)
                     updated += 1
             st.cache_data.clear()
             st.success(f"{updated} motor için çalışma saati güncellendi.")
@@ -1080,7 +1222,7 @@ else:
         st.divider()
 
         pages = ["📊 Özet", "⏱️ Saat Güncelle", "⚙️ Motorlar", "🔧 Bakım Türleri",
-                 "✅ Bakım Tamamla", "🧪 Yağ Analizleri", "📉 Karter Fark Basıncı",
+                 "✅ Bakım Tamamla", "🗓️ Bakım Tarihi Tahmini", "🧪 Yağ Analizleri", "📉 Karter Fark Basıncı",
                  "📋 Motor Bilgi Kartı", "📜 Bakım Kayıtları",
                  "📈 Saat Geçmişi", "📊 Bakım Aralıkları", "📥 Excel"]
         if user["role"] == "yonetici":
@@ -1100,6 +1242,8 @@ else:
         page_types()
     elif choice == "✅ Bakım Tamamla":
         page_complete_maintenance(user)
+    elif choice == "🗓️ Bakım Tarihi Tahmini":
+        page_maintenance_forecast()
     elif choice == "🧪 Yağ Analizleri":
         page_oil_analyses(user)
     elif choice == "📉 Karter Fark Basıncı":
