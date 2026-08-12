@@ -199,7 +199,7 @@ def estimate_daily_usage(engine_doc):
         return None
 
 
-def delete_button(collection, doc_id, key_suffix, current_user, owner_id=None):
+def delete_button(collection, doc_id, key_suffix, current_user, owner_id=None, on_delete=None):
     """Silme yetkisi: yönetici/planlamacı her kaydı, diğer roller yalnızca
     kendi oluşturdukları kaydı silebilir. İki adımlı onay ister."""
     can_delete = current_user["role"] in ("yonetici", "planlamaci") or (owner_id == current_user["_id"])
@@ -213,6 +213,8 @@ def delete_button(collection, doc_id, key_suffix, current_user, owner_id=None):
             st.rerun()
         if c2.button("🗑️ Evet, Sil", key=f"confirmed_{key_suffix}", type="primary", use_container_width=True):
             collection.delete_one({"_id": doc_id})
+            if on_delete:
+                on_delete()
             st.cache_data.clear()
             st.success("Kayıt silindi.")
             st.session_state[confirm_key] = False
@@ -221,6 +223,32 @@ def delete_button(collection, doc_id, key_suffix, current_user, owner_id=None):
         if st.button("🗑️ Sil", key=f"del_{key_suffix}"):
             st.session_state[confirm_key] = True
             st.rerun()
+
+
+def recompute_last_maintenance(engine_id, type_key):
+    """Bir motor + bakım türü için 'son bakım saati'ni, o türe ait tüm kayıtlar
+    arasındaki en güncel (en yüksek) çalışma saatinden yeniden hesaplar.
+    Kayıt eklendiğinde, düzenlendiğinde veya silindiğinde çağrılır — böylece
+    kalan saat hesabı her zaman doğru kalır."""
+    remaining = list(records_col.find({"engine_id": engine_id, "type_key": type_key}))
+    if not remaining:
+        return
+    max_hour = max(rec["hour_at_completion"] for rec in remaining)
+    types_col.update_one(
+        {"_id": type_key},
+        {"$set": {f"engine_states.{engine_id}.last_maintenance_hour": max_hour}},
+        upsert=True,
+    )
+
+
+def update_engine_hours(engine_id, new_hours):
+    """Motorun merkezi (güncel) çalışma saatini günceller ve geçmişe bir kayıt ekler."""
+    stamp = datetime.utcnow()
+    engines_col.update_one(
+        {"_id": engine_id},
+        {"$set": {"hours": new_hours, "updated_at": stamp},
+         "$push": {"history": {"date": stamp.isoformat(), "hours": new_hours}}},
+    )
 
 
 # ============================================================
@@ -554,15 +582,14 @@ def page_complete_maintenance(current_user):
     st.markdown("---")
     backdated = st.checkbox("📅 Geçmişe dönük kayıt (bu bakım geçmişte yapıldı, bugün değil)")
     if backdated:
-        col1, col2 = st.columns(2)
-        with col1:
-            record_date = st.date_input("Bakımın yapıldığı tarih", value=date.today(), max_value=date.today())
-        with col2:
-            record_hours = st.number_input("O tarihteki motor çalışma saati", min_value=0.0,
-                                            value=float(engine_hours_now), step=1.0)
+        record_date = st.date_input("Bakımın yapıldığı tarih", value=date.today(), max_value=date.today())
     else:
         record_date = date.today()
-        record_hours = engine_hours_now
+
+    record_hours = st.number_input(
+        "O anki motor çalışma saati", min_value=0.0, value=float(engine_hours_now), step=1.0,
+        help="Bakımın yapıldığı andaki motor çalışma saatini girin. Geçmişe dönük olmayan kayıtlarda bu değer motorun güncel çalışma saatine de yazılır."
+    )
 
     # Karter fark basıncı — krankcase filtresi ve intercooler bakımlarında ölçülür
     pressure_reading = None
@@ -598,23 +625,20 @@ def page_complete_maintenance(current_user):
             record["pressure_reading"] = pressure_reading
         records_col.insert_one(record)
 
-        # 'Son bakım saati'ni yalnızca bu kayıt, o tür için bilinen en güncel
-        # bakım ise güncelle — geçmişe dönük eski bir kayıt, daha yeni bir
-        # bakımın üzerine yanlışlıkla yazmasın.
-        if record_hours >= last_hour_before:
-            types_col.update_one(
-                {"_id": chosen_key},
-                {"$set": {f"engine_states.{engine_name}.last_maintenance_hour": record_hours,
-                          f"engine_states.{engine_name}.period_hours": period}},
-                upsert=True,
-            )
-        elif is_new_for_engine:
-            types_col.update_one(
-                {"_id": chosen_key},
-                {"$set": {f"engine_states.{engine_name}.last_maintenance_hour": record_hours,
-                          f"engine_states.{engine_name}.period_hours": period}},
-                upsert=True,
-            )
+        # Bu bakım türünün periyodunu (yeni tanımlanan tür ise veya değiştiyse) kaydet,
+        # ardından 'son bakım saati'ni bu motor + tür için var olan TÜM kayıtlardan
+        # yeniden hesapla — böylece kalan saat her zaman doğru kalır.
+        types_col.update_one(
+            {"_id": chosen_key},
+            {"$set": {f"engine_states.{engine_name}.period_hours": period}},
+            upsert=True,
+        )
+        recompute_last_maintenance(engine_name, chosen_key)
+
+        # Geçmişe dönük olmayan kayıtlarda, girilen saat motorun GÜNCEL çalışma
+        # saatini de günceller (bu ekrandan hem bakım hem motor saati tek seferde girilebilsin diye).
+        if not backdated and record_hours != engine_hours_now:
+            update_engine_hours(engine_name, record_hours)
 
         st.cache_data.clear()
         st.success(f"{chosen_type['label']} bakımı {engine_name} için kaydedildi.")
@@ -665,7 +689,8 @@ def page_records(current_user):
                             st.session_state[f"edit_{r['_id']}"] = not st.session_state.get(f"edit_{r['_id']}", False)
                             st.rerun()
                 with bc2:
-                    delete_button(records_col, r["_id"], f"rec_{r['_id']}", current_user, owner_id=r.get("technician_id"))
+                    delete_button(records_col, r["_id"], f"rec_{r['_id']}", current_user, owner_id=r.get("technician_id"),
+                                  on_delete=lambda eng=r["engine_id"], tk=r["type_key"]: recompute_last_maintenance(eng, tk))
 
                 if can_edit and st.session_state.get(f"edit_{r['_id']}"):
                     edit_maintenance_record(r, photos)
@@ -674,6 +699,10 @@ def page_records(current_user):
 def edit_maintenance_record(r, current_photos):
     st.markdown("---")
     st.caption("Düzenleme modu")
+    new_hours = st.number_input("Motor Çalışma Saati (bu bakımın yapıldığı andaki)",
+                                 min_value=0.0, value=float(r["hour_at_completion"]), step=1.0,
+                                 key=f"ed_hours_{r['_id']}",
+                                 help="Bu bakım kaydına ait çalışma saatini düzeltir. Geçmişe dönük olmayan kayıtlarda motorun güncel çalışma saatini de günceller.")
     new_note = st.text_area("Ölçüm / Teknik Açıklama", value=r.get("note", ""), key=f"ed_note_{r['_id']}")
     new_tech_note = st.text_area("Bakımcı Notu", value=r.get("technician_note", ""), key=f"ed_tnote_{r['_id']}")
     new_pressure = None
@@ -712,10 +741,23 @@ def edit_maintenance_record(r, current_photos):
             except Exception:
                 st.warning("Bir fotoğraf işlenemedi, atlandı.")
 
-        update = {"note": new_note, "technician_note": new_tech_note, "photos_b64": keep_photos + added_photos}
+        update = {
+            "hour_at_completion": new_hours, "note": new_note,
+            "technician_note": new_tech_note, "photos_b64": keep_photos + added_photos,
+        }
         if new_pressure is not None:
             update["pressure_reading"] = new_pressure
         records_col.update_one({"_id": r["_id"]}, {"$set": update})
+
+        # Saat değiştiyse, bu motor + bakım türü için 'son bakım saati'ni
+        # tüm kayıtlardan yeniden hesapla.
+        if new_hours != r["hour_at_completion"]:
+            recompute_last_maintenance(r["engine_id"], r["type_key"])
+            # Geçmişe dönük olmayan bir kaydın saati düzeltildiyse, motorun
+            # güncel çalışma saatini de aynı değere güncelle.
+            if not r.get("backdated"):
+                update_engine_hours(r["engine_id"], new_hours)
+
         st.session_state[f"edit_{r['_id']}"] = False
         st.cache_data.clear()
         st.success("Kayıt güncellendi.")
