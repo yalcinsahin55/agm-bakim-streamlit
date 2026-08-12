@@ -647,9 +647,24 @@ def page_complete_maintenance(current_user):
 
 def page_records(current_user):
     st.markdown("### Bakım Kayıtları")
-    records = list(records_col.find().sort("created_at", -1).limit(200))
+
+    engine_names = sorted({e["name"] for e in engines_col.find()}, key=engine_sort_key)
+    type_labels = sorted({t["label"] for t in types_col.find()})
+
+    c1, c2 = st.columns(2)
+    engine_filter = c1.selectbox("Motora göre filtrele", ["Tümü"] + engine_names, key="rec_engine_filter")
+    type_filter = c2.selectbox("Bakım türüne göre filtrele", ["Tümü"] + type_labels, key="rec_type_filter")
+
+    query = {}
+    if engine_filter != "Tümü":
+        query["engine_id"] = engine_filter
+    if type_filter != "Tümü":
+        query["type_label"] = type_filter
+
+    records = list(records_col.find(query).sort("created_at", -1).limit(500))
+    st.caption(f"{len(records)} kayıt")
     if not records:
-        st.info("Henüz tamamlanmış bakım yok.")
+        st.info("Kayıt bulunamadı.")
         return
 
     for r in records:
