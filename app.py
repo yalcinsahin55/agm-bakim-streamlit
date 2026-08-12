@@ -1283,12 +1283,50 @@ def import_equipment_excel(uploaded_file):
     return updated
 
 
+def slugify_key(label):
+    """Türkçe karakterleri sadeleştirerek bir etiketten benzersiz bir anahtar üretir."""
+    tr_map = str.maketrans("çğıöşüÇĞİÖŞÜ", "cgiosuCGIOSU")
+    s = label.translate(tr_map).lower()
+    s = "".join(ch if ch.isalnum() else "_" for ch in s)
+    while "__" in s:
+        s = s.replace("__", "_")
+    return s.strip("_")
+
+
 def page_maintenance_type_admin(current_user):
     if current_user["role"] != "yonetici":
         st.warning("Bu sayfa yalnızca yöneticiler içindir.")
         return
     st.markdown("### Bakım Türü Yönetimi")
-    st.caption("Artık takip edilmesini istemediğiniz bir bakım türünü, o türe ait tüm geçmiş kayıtlarıyla birlikte kalıcı olarak silebilirsiniz. Bu işlem geri alınamaz.")
+
+    with st.expander("➕ Yeni Bakım Türü Ekle"):
+        new_label = st.text_input("Bakım türü adı", key="new_type_label", placeholder="örn. Egzoz Valfi Kontrolü")
+        new_period = st.number_input("Periyodik bakım saati", min_value=1.0, value=1000.0, step=100.0, key="new_type_period")
+        apply_to_all = st.checkbox("Şimdi tüm motorlara uygula (motorların güncel saatini başlangıç kabul eder)",
+                                    value=True, key="new_type_apply_all")
+        if st.button("Bakım Türünü Ekle", key="add_type_btn"):
+            if not new_label.strip():
+                st.error("Lütfen bir isim girin.")
+            else:
+                key = slugify_key(new_label)
+                if not key:
+                    st.error("Geçersiz isim, lütfen farklı bir isim deneyin.")
+                elif types_col.find_one({"_id": key}):
+                    st.error("Bu veya çok benzer isimde bir bakım türü zaten var.")
+                else:
+                    engine_states = {}
+                    if apply_to_all:
+                        for e in engines_col.find():
+                            engine_states[e["_id"]] = {"last_maintenance_hour": e["hours"], "period_hours": new_period}
+                    types_col.insert_one({
+                        "_id": key, "key": key, "label": new_label.strip(),
+                        "default_period_hours": new_period, "engine_states": engine_states,
+                    })
+                    st.cache_data.clear()
+                    st.success(f"'{new_label.strip()}' bakım türü eklendi.")
+                    st.rerun()
+
+    st.caption("Bir bakım türünün adını/periyodunu düzenleyebilir veya artık takip edilmesini istemediğiniz bir türü tüm geçmiş kayıtlarıyla birlikte kalıcı olarak silebilirsiniz.")
 
     all_types = sorted(types_col.find(), key=lambda t: t["label"])
     if not all_types:
@@ -1299,11 +1337,17 @@ def page_maintenance_type_admin(current_user):
         record_count = records_col.count_documents({"type_key": t["key"]})
         engine_count = len(t.get("engine_states", {}))
         with st.container(border=True):
-            c1, c2 = st.columns([4, 1])
+            c1, c2, c3 = st.columns([3, 1, 1])
             with c1:
                 st.markdown(f"**{t['label']}**")
-                st.caption(f"{engine_count} motorda tanımlı · {record_count} bakım kaydı")
+                st.caption(f"{engine_count} motorda tanımlı · {record_count} bakım kaydı · Varsayılan periyot: {t['default_period_hours']} sa")
+
+            edit_key = f"edit_type_{t['_id']}"
             with c2:
+                if st.button("✏️ Düzenle", key=f"edbtn_type_{t['_id']}", use_container_width=True):
+                    st.session_state[edit_key] = not st.session_state.get(edit_key, False)
+                    st.rerun()
+            with c3:
                 confirm_key = f"confirm_del_type_{t['_id']}"
                 if st.session_state.get(confirm_key):
                     if st.button("⚠️ Emin misiniz?", key=f"sure_{t['_id']}", type="primary", use_container_width=True):
@@ -1320,6 +1364,34 @@ def page_maintenance_type_admin(current_user):
                     if st.button("🗑️ Sil", key=f"del_type_{t['_id']}", use_container_width=True):
                         st.session_state[confirm_key] = True
                         st.rerun()
+
+            if st.session_state.get(edit_key):
+                st.markdown("---")
+                edited_label = st.text_input("Bakım türü adı", value=t["label"], key=f"ed_label_{t['_id']}")
+                edited_period = st.number_input("Varsayılan periyodik bakım saati", min_value=1.0,
+                                                 value=float(t["default_period_hours"]), step=100.0, key=f"ed_period_{t['_id']}")
+                apply_period_all = st.checkbox("Bu periyodu, bu türü zaten kullanan tüm motorlara da uygula",
+                                                value=False, key=f"ed_applyall_{t['_id']}",
+                                                help="İşaretlemezseniz sadece yeni motorlar için varsayılan olarak kullanılır, mevcut motorların periyodu değişmez.")
+                sc1, sc2 = st.columns(2)
+                if sc1.button("Vazgeç", key=f"ed_cancel_type_{t['_id']}", use_container_width=True):
+                    st.session_state[edit_key] = False
+                    st.rerun()
+                if sc2.button("💾 Kaydet", key=f"ed_save_type_{t['_id']}", type="primary", use_container_width=True):
+                    update = {"label": edited_label.strip(), "default_period_hours": edited_period}
+                    types_col.update_one({"_id": t["_id"]}, {"$set": update})
+                    if apply_period_all:
+                        for eng_id in t.get("engine_states", {}):
+                            types_col.update_one(
+                                {"_id": t["_id"]},
+                                {"$set": {f"engine_states.{eng_id}.period_hours": edited_period}},
+                            )
+                    if edited_label.strip() != t["label"]:
+                        records_col.update_many({"type_key": t["key"]}, {"$set": {"type_label": edited_label.strip()}})
+                    st.session_state[edit_key] = False
+                    st.cache_data.clear()
+                    st.success("Bakım türü güncellendi.")
+                    st.rerun()
 
 
 def page_users(current_user):
