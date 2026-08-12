@@ -43,6 +43,8 @@ types_col = db["maintenance_types"]
 records_col = db["maintenance_records"]
 users_col = db["users"]
 oil_analyses_col = db["oil_analyses"]
+pressure_readings_col = db["pressure_readings"]
+equipment_info_col = db["equipment_info"]
 
 
 def seed_if_empty():
@@ -88,7 +90,44 @@ def seed_if_empty():
             )
 
 
+def seed_equipment_info():
+    """Motorlar_hava_filtre_ve_kaver_tipleri dosyasındaki referans bilgileri, koleksiyon boşsa yükler."""
+    if equipment_info_col.count_documents({}) > 0:
+        return
+    path = os.path.join(os.path.dirname(__file__), "equipment_info.json")
+    if not os.path.exists(path):
+        return
+    with open(path, encoding="utf-8") as f:
+        data = json.load(f)
+    for name, info in data.items():
+        equipment_info_col.update_one({"_id": name}, {"$setOnInsert": {**info, "engine_name": name}}, upsert=True)
+
+
+def seed_pressure_history():
+    """KARTER_FARK_BASINÇLARI dosyasındaki geçmiş okumaları, koleksiyon boşsa yükler."""
+    if pressure_readings_col.count_documents({}) > 0:
+        return
+    path = os.path.join(os.path.dirname(__file__), "karter_history.json")
+    if not os.path.exists(path):
+        return
+    with open(path, encoding="utf-8") as f:
+        readings = json.load(f)
+    docs = []
+    for r in readings:
+        docs.append({
+            "engine_id": r["engine"], "engine_name": r["engine"],
+            "reading_date": datetime.fromisoformat(r["date"]),
+            "load_kw": r["load"], "pressure_bar": r["pressure"], "status": r.get("status"),
+            "new_type": r.get("new_type", False), "note": None,
+            "uploaded_by": "V10 içe aktarma", "created_at": datetime.utcnow(),
+        })
+    if docs:
+        pressure_readings_col.insert_many(docs)
+
+
 seed_if_empty()
+seed_equipment_info()
+seed_pressure_history()
 
 
 # ============================================================
@@ -135,6 +174,30 @@ def build_items():
 def engine_sort_key(name):
     digits = "".join(ch for ch in name if ch.isdigit())
     return int(digits) if digits else 0
+
+
+def delete_button(collection, doc_id, key_suffix, current_user, owner_id=None):
+    """Silme yetkisi: yönetici/planlamacı her kaydı, diğer roller yalnızca
+    kendi oluşturdukları kaydı silebilir. İki adımlı onay ister."""
+    can_delete = current_user["role"] in ("yonetici", "planlamaci") or (owner_id == current_user["_id"])
+    if not can_delete:
+        return
+    confirm_key = f"confirm_del_{key_suffix}"
+    if st.session_state.get(confirm_key):
+        c1, c2 = st.columns(2)
+        if c1.button("❌ Vazgeç", key=f"cancel_{key_suffix}", use_container_width=True):
+            st.session_state[confirm_key] = False
+            st.rerun()
+        if c2.button("🗑️ Evet, Sil", key=f"confirmed_{key_suffix}", type="primary", use_container_width=True):
+            collection.delete_one({"_id": doc_id})
+            st.cache_data.clear()
+            st.success("Kayıt silindi.")
+            st.session_state[confirm_key] = False
+            st.rerun()
+    else:
+        if st.button("🗑️ Sil", key=f"del_{key_suffix}"):
+            st.session_state[confirm_key] = True
+            st.rerun()
 
 
 # ============================================================
@@ -220,15 +283,24 @@ def login_view():
 # ============================================================
 def page_dashboard():
     items, engines, types = build_items()
-    counts = {"gecikmis": 0, "kritik": 0, "yaklasiyor": 0, "normal": 0}
-    for i in items:
-        counts[i["status"]] += 1
 
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("🔴 Gecikmiş", counts["gecikmis"])
-    c2.metric("🟠 Kritik", counts["kritik"])
-    c3.metric("🟡 Yaklaşıyor", counts["yaklasiyor"])
-    c4.metric("🟢 Normal", counts["normal"])
+    st.markdown("### Bakım Bildirimleri")
+    for status_key, header in [("gecikmis", "🔴 Gecikmiş"), ("kritik", "🟠 Kritik"), ("yaklasiyor", "🟡 Yaklaşıyor")]:
+        subset = [i for i in items if i["status"] == status_key]
+        with st.expander(f"{header} ({len(subset)})", expanded=(status_key == "gecikmis" and len(subset) > 0)):
+            if not subset:
+                st.caption("Kayıt yok.")
+                continue
+            by_type = {}
+            for i in subset:
+                by_type.setdefault(i["type_label"], []).append(i)
+            rows = sorted(by_type.items(), key=lambda kv: -len(kv[1]))
+            breakdown_df = pd.DataFrame([{"Bakım Türü": label, "Motor Sayısı": len(lst)} for label, lst in rows])
+            st.dataframe(breakdown_df, use_container_width=True, hide_index=True,
+                         height=min(35 * (len(breakdown_df) + 1) + 3, 500))
+
+    normal_count = len([i for i in items if i["status"] == "normal"])
+    st.caption(f"🟢 Normal: {normal_count} bakım kaydı")
 
     st.markdown("### Motor Yükleri")
     load_rows = sorted(engines.values(), key=lambda e: engine_sort_key(e["name"]))
@@ -240,26 +312,31 @@ def page_dashboard():
     load_df = pd.DataFrame([{"Motor": e["name"], "Yük (kW)": e.get("load_kw", 0), "Çalışma Saati": e["hours"]} for e in load_rows])
     st.dataframe(load_df, use_container_width=True, hide_index=True, height=220)
 
-    st.markdown("### Öncelikli Bakımlar")
-    status_filter = st.selectbox("Duruma göre filtrele", ["Tümü", "Gecikmiş", "Kritik", "Yaklaşıyor", "Normal"], key="dash_filter")
+    st.markdown("### Bakım Türüne Göre Görüntüle")
+    type_options = ["Tümü"] + sorted({i["type_label"] for i in items})
+    type_choice = st.selectbox("Bakım türü seç", type_options, key="dash_type_filter")
+    status_choice = st.selectbox("Durum (opsiyonel)", ["Tümü", "Gecikmiş", "Kritik", "Yaklaşıyor", "Normal"], key="dash_status_filter")
     filter_map = {"Gecikmiş": "gecikmis", "Kritik": "kritik", "Yaklaşıyor": "yaklasiyor", "Normal": "normal"}
 
-    rows = sorted(items, key=lambda i: i["remaining"])
-    if status_filter != "Tümü":
-        rows = [i for i in rows if i["status"] == filter_map[status_filter]]
-    else:
-        rows = [i for i in rows if i["remaining"] <= YAKLASIYOR_ESIK][:60]
+    rows = items
+    if type_choice != "Tümü":
+        rows = [i for i in rows if i["type_label"] == type_choice]
+    if status_choice != "Tümü":
+        rows = [i for i in rows if i["status"] == filter_map[status_choice]]
+    rows = sorted(rows, key=lambda i: i["remaining"])
 
     if not rows:
-        st.success("Görüntülenecek bakım kaydı yok — her şey normal aralıkta.")
+        st.info("Kayıt bulunamadı.")
         return
 
     df = pd.DataFrame([{
         "Motor": r["engine_name"], "Bakım Türü": r["type_label"],
+        "Motor Saati": r["engine_hours"], "Son Bakım Saati": r["last_hour"],
+        "Bakımdan Sonra Çalışılan": round(r["engine_hours"] - r["last_hour"], 1),
         "Kalan Saat": round(r["remaining"], 1), "Durum": STATUS_LABELS[r["status"]],
-        "Motor Saati": r["engine_hours"], "Son Bakım Saati": r["last_hour"], "Periyot": r["period"],
     } for r in rows])
-    st.dataframe(df, use_container_width=True, hide_index=True, height=460)
+    height = min(35 * (len(df) + 1) + 3, 1600)
+    st.dataframe(df, use_container_width=True, hide_index=True, height=height)
 
 
 def page_hours_update():
@@ -294,12 +371,12 @@ def page_hours_update():
 def page_engines():
     items, engines, types = build_items()
     st.markdown("### Motorlar")
+    st.caption("Bir motoru açarak o motora ait tüm bakım türlerini ve durumlarını görebilirsiniz.")
 
     query = st.text_input("Motor ara", placeholder="örn. AGM 12")
-    status_filter = st.selectbox("Durum filtresi", ["Tümü", "Gecikmiş", "Kritik", "Yaklaşıyor", "Normal"])
     sort_by = st.radio("Sırala", ["Durum", "Motor No", "Çalışma Saati", "Yük"], horizontal=True)
-    filter_map = {"Gecikmiş": "gecikmis", "Kritik": "kritik", "Yaklaşıyor": "yaklasiyor", "Normal": "normal"}
     status_order = {"gecikmis": 0, "kritik": 1, "yaklasiyor": 2, "normal": 3}
+    status_icon = {"gecikmis": "🔴", "kritik": "🟠", "yaklasiyor": "🟡", "normal": "🟢"}
 
     rows = []
     for name, e in engines.items():
@@ -308,14 +385,9 @@ def page_engines():
         eng_items = sorted([i for i in items if i["engine_id"] == name], key=lambda i: i["remaining"])
         worst = eng_items[0] if eng_items else None
         status = worst["status"] if worst else "normal"
-        gecikmis_n = sum(1 for i in eng_items if i["status"] == "gecikmis")
-        kritik_n = sum(1 for i in eng_items if i["status"] == "kritik")
         rows.append({"name": name, "hours": e["hours"], "load": e.get("load_kw", 0),
-                      "status": status, "gecikmis": gecikmis_n, "kritik": kritik_n,
+                      "status": status, "items": eng_items,
                       "worst_remaining": worst["remaining"] if worst else 999999})
-
-    if status_filter != "Tümü":
-        rows = [r for r in rows if r["status"] == filter_map[status_filter]]
 
     if sort_by == "Durum":
         rows.sort(key=lambda r: (status_order[r["status"]], r["worst_remaining"]))
@@ -330,12 +402,19 @@ def page_engines():
         st.info("Eşleşen motor bulunamadı.")
         return
 
-    df = pd.DataFrame([{
-        "Motor": r["name"], "Durum": STATUS_LABELS[r["status"]],
-        "Çalışma Saati": r["hours"], "Yük (kW)": r["load"],
-        "Gecikmiş Bakım": r["gecikmis"], "Kritik Bakım": r["kritik"],
-    } for r in rows])
-    st.dataframe(df, use_container_width=True, hide_index=True, height=560)
+    for r in rows:
+        label = f"{status_icon[r['status']]} {r['name']} · {r['hours']:,.0f} sa · {r['load']:,.0f} kW"
+        with st.expander(label):
+            if not r["items"]:
+                st.caption("Bu motor için tanımlı bakım türü yok.")
+                continue
+            df = pd.DataFrame([{
+                "Bakım Türü": i["type_label"], "Son Bakım Saati": i["last_hour"], "Periyot": i["period"],
+                "Bakımdan Sonra Çalışılan": round(i["engine_hours"] - i["last_hour"], 1),
+                "Kalan Saat": round(i["remaining"], 1), "Durum": STATUS_LABELS[i["status"]],
+            } for i in r["items"]])
+            st.dataframe(df, use_container_width=True, hide_index=True,
+                         height=min(35 * (len(df) + 1) + 3, 900))
 
 
 def page_types():
@@ -359,9 +438,10 @@ def page_types():
 
     df = pd.DataFrame([{
         "Motor": r["engine_name"], "Motor Saati": r["engine_hours"], "Son Bakım Saati": r["last_hour"],
-        "Periyot": r["period"], "Kalan Saat": round(r["remaining"], 1), "Durum": STATUS_LABELS[r["status"]],
+        "Periyot": r["period"], "Bakımdan Sonra Çalışılan": round(r["engine_hours"] - r["last_hour"], 1),
+        "Kalan Saat": round(r["remaining"], 1), "Durum": STATUS_LABELS[r["status"]],
     } for r in rows])
-    st.dataframe(df, use_container_width=True, hide_index=True, height=520)
+    st.dataframe(df, use_container_width=True, hide_index=True, height=min(35 * (len(df) + 1) + 3, 1200))
 
 
 def compress_photo(uploaded_file, max_dim=720, quality=65):
@@ -442,24 +522,28 @@ def page_complete_maintenance(current_user):
     if chosen_key in ("krank", "intercooler"):
         pressure_reading = st.number_input("Fark Basıncı (bar)", min_value=0.0, step=0.1, format="%.2f")
 
-    note = st.text_area("Ölçüm / açıklama (opsiyonel)")
-    photo = st.file_uploader("Fotoğraf ekle (opsiyonel)", type=["jpg", "jpeg", "png", "webp"])
+    note = st.text_area("Ölçüm / Teknik Açıklama (opsiyonel)", help="Ölçüm değerleri, gözlemler, teknik detaylar")
+    tech_note = st.text_area("Bakımcı Notu (opsiyonel)", help="Bakımı yapan kişinin genel notu/yorumu")
+    photos = st.file_uploader("Fotoğraf ekle (opsiyonel, birden fazla seçebilirsiniz)",
+                               type=["jpg", "jpeg", "png", "webp"], accept_multiple_files=True)
     camera_photo = st.camera_input("Ya da doğrudan fotoğraf çek (opsiyonel)")
 
     if st.button("✅ Bakımı Tamamla", use_container_width=True, type="primary"):
-        photo_b64 = None
-        chosen_photo = camera_photo or photo
-        if chosen_photo is not None:
+        photos_b64 = []
+        all_photos = list(photos) if photos else []
+        if camera_photo is not None:
+            all_photos.append(camera_photo)
+        for p in all_photos:
             try:
-                photo_b64 = compress_photo(chosen_photo)
+                photos_b64.append(compress_photo(p))
             except Exception:
-                st.warning("Fotoğraf işlenemedi, kayıt fotoğrafsız kaydedildi.")
+                st.warning("Bir fotoğraf işlenemedi, atlandı.")
 
         record_datetime = datetime.combine(record_date, datetime.now().time())
         record = {
             "engine_id": engine_name, "engine_name": engine_name,
             "type_key": chosen_key, "type_label": chosen_type["label"],
-            "hour_at_completion": record_hours, "note": note, "photo_b64": photo_b64,
+            "hour_at_completion": record_hours, "note": note, "technician_note": tech_note, "photos_b64": photos_b64,
             "technician_id": current_user["_id"], "technician_name": current_user["full_name"],
             "created_at": record_datetime, "backdated": backdated,
         }
@@ -490,7 +574,7 @@ def page_complete_maintenance(current_user):
         st.rerun()
 
 
-def page_records():
+def page_records(current_user):
     st.markdown("### Bakım Kayıtları")
     records = list(records_col.find().sort("created_at", -1).limit(200))
     if not records:
@@ -499,10 +583,17 @@ def page_records():
 
     for r in records:
         with st.container(border=True):
-            cols = st.columns([1, 4]) if r.get("photo_b64") else [None, st.container()]
-            if r.get("photo_b64"):
+            photos = r.get("photos_b64") or ([r["photo_b64"]] if r.get("photo_b64") else [])
+            if photos:
+                cols = st.columns([1, 3])
                 with cols[0]:
-                    st.image(base64.b64decode(r["photo_b64"]), use_container_width=True)
+                    if len(photos) == 1:
+                        st.image(base64.b64decode(photos[0]), use_container_width=True)
+                    else:
+                        photo_cols = st.columns(min(len(photos), 3))
+                        for idx, p in enumerate(photos):
+                            with photo_cols[idx % len(photo_cols)]:
+                                st.image(base64.b64decode(p), use_container_width=True)
                 info_col = cols[1]
             else:
                 info_col = st.container()
@@ -516,6 +607,9 @@ def page_records():
                     st.caption(f"📈 Fark Basıncı: {r['pressure_reading']} bar")
                 if r.get("note"):
                     st.caption(f"📝 {r['note']}")
+                if r.get("technician_note"):
+                    st.caption(f"🗒️ Bakımcı Notu: {r['technician_note']}")
+                delete_button(records_col, r["_id"], f"rec_{r['_id']}", current_user, owner_id=r.get("technician_id"))
 
 
 def page_hours_history():
@@ -675,7 +769,8 @@ def page_oil_analyses(current_user):
                         "engine_id": engine_name, "engine_name": engine_name,
                         "analysis_date": datetime.combine(analysis_date, datetime.min.time()),
                         "result": result, "note": note, "pdf_b64": pdf_b64, "pdf_filename": pdf_file.name,
-                        "uploaded_by": current_user["full_name"], "created_at": datetime.utcnow(),
+                        "uploaded_by": current_user["full_name"], "uploaded_by_id": current_user["_id"],
+                        "created_at": datetime.utcnow(),
                     })
                     st.success(f"{engine_name} için analiz raporu kaydedildi.")
                     st.rerun()
@@ -698,11 +793,250 @@ def page_oil_analyses(current_user):
                 st.caption(f"Analiz tarihi: {a['analysis_date'].strftime('%d.%m.%Y')} · Yükleyen: {a.get('uploaded_by','')}")
                 if a.get("note"):
                     st.caption(f"📝 {a['note']}")
+                delete_button(oil_analyses_col, a["_id"], f"oil_{a['_id']}", current_user, owner_id=a.get("uploaded_by_id"))
             with c2:
                 if a.get("pdf_b64"):
                     st.download_button("📄 PDF İndir", base64.b64decode(a["pdf_b64"]),
                                         file_name=a.get("pdf_filename", "analiz.pdf"),
                                         mime="application/pdf", key=f"dl_{a['_id']}")
+
+
+def page_pressure_readings(current_user):
+    st.markdown("### Karter Fark Basıncı")
+    st.caption("Motorların düzenli karter fark basıncı ve yük ölçümlerini kaydedin ve zaman içindeki değişimi izleyin.")
+
+    engines = sorted(engines_col.find(), key=lambda e: engine_sort_key(e["name"]))
+    engine_names = [e["name"] for e in engines]
+
+    tab_new, tab_history, tab_import = st.tabs(["➕ Yeni Ölçüm", "📈 Geçmiş / Grafik", "📥 Excel'den İçe Aktar"])
+
+    with tab_new:
+        if current_user["role"] == "goruntuleyici":
+            st.warning("Görüntüleyici rolü ölçüm ekleyemez.")
+        else:
+            reading_date = st.date_input("Ölçüm tarihi", value=date.today(), max_value=date.today(), key="pr_date")
+            st.caption("Her motor için yük (kW) ve fark basıncını (bar) girin. Bakımda olan motorlar için kutucuğu işaretleyin.")
+            entries = {}
+            for e in engines:
+                with st.container(border=True):
+                    c1, c2, c3, c4 = st.columns([2, 2, 2, 1.5])
+                    c1.markdown(f"**{e['name']}**")
+                    under_maint = c4.checkbox("Bakımda/Yedek", key=f"pr_maint_{e['_id']}")
+                    load_val = c2.number_input("Yük (kW)", key=f"pr_load_{e['_id']}", step=10.0, disabled=under_maint, label_visibility="collapsed", placeholder="Yük (kW)")
+                    pressure_val = c3.number_input("Fark Basıncı (bar)", key=f"pr_press_{e['_id']}", step=0.1, format="%.2f", disabled=under_maint, label_visibility="collapsed", placeholder="Fark Basıncı")
+                    entries[e["name"]] = (load_val, pressure_val, under_maint)
+
+            if st.button("💾 Tüm Ölçümleri Kaydet", type="primary", use_container_width=True):
+                stamp = datetime.combine(reading_date, datetime.now().time())
+                docs = []
+                for name, (load_val, pressure_val, under_maint) in entries.items():
+                    if under_maint:
+                        docs.append({"engine_id": name, "engine_name": name, "reading_date": stamp,
+                                      "load_kw": None, "pressure_bar": None, "status": "BAKIMDA",
+                                      "new_type": False, "note": None,
+                                      "uploaded_by": current_user["full_name"], "uploaded_by_id": current_user["_id"],
+                                      "created_at": datetime.utcnow()})
+                    elif load_val or pressure_val:
+                        docs.append({"engine_id": name, "engine_name": name, "reading_date": stamp,
+                                      "load_kw": load_val or None, "pressure_bar": pressure_val or None, "status": None,
+                                      "new_type": False, "note": None,
+                                      "uploaded_by": current_user["full_name"], "uploaded_by_id": current_user["_id"],
+                                      "created_at": datetime.utcnow()})
+                if docs:
+                    pressure_readings_col.insert_many(docs)
+                    st.success(f"{len(docs)} motor için ölçüm kaydedildi.")
+                    st.rerun()
+                else:
+                    st.warning("Kaydedilecek bir değer girilmedi.")
+
+    with tab_history:
+        selected = st.selectbox("Motor seç", engine_names, key="pr_hist_engine")
+        readings = list(pressure_readings_col.find({"engine_id": selected}).sort("reading_date", 1))
+        numeric_readings = [r for r in readings if r.get("pressure_bar") is not None]
+
+        if len(numeric_readings) >= 2:
+            df = pd.DataFrame([{"Tarih": r["reading_date"], "Fark Basıncı (bar)": r["pressure_bar"]} for r in numeric_readings])
+            df = df.set_index("Tarih")
+            st.line_chart(df)
+
+        if readings:
+            table_rows = []
+            for r in reversed(readings):
+                table_rows.append({
+                    "Tarih": r["reading_date"].strftime("%d.%m.%Y"),
+                    "Yük (kW)": r.get("load_kw") if r.get("load_kw") is not None else "-",
+                    "Fark Basıncı (bar)": r.get("pressure_bar") if r.get("pressure_bar") is not None else "-",
+                    "Durum": r.get("status") or "-",
+                })
+            st.dataframe(pd.DataFrame(table_rows), use_container_width=True, hide_index=True)
+
+            with st.expander("Tek tek kayıt sil"):
+                for r in reversed(readings):
+                    c1, c2 = st.columns([4, 1])
+                    c1.caption(f"{r['reading_date'].strftime('%d.%m.%Y')} · Basınç: {r.get('pressure_bar','-')} · Yük: {r.get('load_kw','-')}")
+                    with c2:
+                        delete_button(pressure_readings_col, r["_id"], f"pr_{r['_id']}", current_user, owner_id=r.get("uploaded_by_id"))
+        else:
+            st.info("Bu motor için henüz ölçüm kaydı yok.")
+
+    with tab_import:
+        st.caption("KARTER_FARK_BASINÇLARI.xlsx ile aynı yapıdaki bir dosyayı yükleyerek geçmiş ölçümleri toplu ekleyebilirsiniz. Her sayfa adı bir tarih (GG.AA.YYYY) olmalıdır.")
+        up = st.file_uploader("Excel dosyası seç", type=["xlsx"], key="pr_import_file")
+        if up is not None and st.button("İçe Aktar", key="pr_import_btn"):
+            try:
+                added = import_pressure_excel(up, current_user)
+                st.success(f"{added} ölçüm kaydı eklendi.")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Dosya okunamadı: {e}")
+
+
+def import_pressure_excel(uploaded_file, current_user):
+    from openpyxl import load_workbook
+    wb = load_workbook(uploaded_file, data_only=True)
+
+    def to_number(v):
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return None
+
+    def norm(name):
+        s = str(name).strip().replace("-", " ")
+        return " ".join(s.split())
+
+    docs = []
+    for sheetname in wb.sheetnames:
+        ws = wb[sheetname]
+        try:
+            d, m, y = sheetname.split(".")
+            sheet_date = datetime(int(y), int(m), int(d))
+        except Exception:
+            continue
+
+        header_row = None
+        for r in range(1, 6):
+            for c in range(1, 12):
+                if ws.cell(r, c).value == "MOTOR NO":
+                    header_row = r
+                    break
+            if header_row:
+                break
+        if header_row is None:
+            continue
+
+        header_cells = [(c, str(ws.cell(header_row, c).value).strip())
+                         for c in range(1, 15) if ws.cell(header_row, c).value is not None]
+        blocks, current = [], None
+        for c, label in header_cells:
+            if label == "MOTOR NO":
+                if current:
+                    blocks.append(current)
+                current = {"motor_col": c, "load_col": None, "pressure_col": None, "end_col": c}
+            elif current:
+                if label == "YÜK":
+                    current["load_col"] = c
+                elif label == "KARTER FARK BASINCI":
+                    current["pressure_col"] = c
+                current["end_col"] = c
+        if current:
+            blocks.append(current)
+
+        for r in range(header_row + 1, ws.max_row + 1):
+            for b in blocks:
+                engine_raw = ws.cell(r, b["motor_col"]).value
+                if not engine_raw or "AGM" not in str(engine_raw).upper():
+                    continue
+                engine = norm(engine_raw)
+                if not engines_col.find_one({"_id": engine}):
+                    continue
+                load_val = ws.cell(r, b["load_col"]).value if b["load_col"] else None
+                pressure_val = ws.cell(r, b["pressure_col"]).value if b["pressure_col"] else None
+                status = None
+                for v in (load_val, pressure_val):
+                    if v is not None and to_number(v) is None:
+                        status = str(v).strip().upper()
+                docs.append({
+                    "engine_id": engine, "engine_name": engine, "reading_date": sheet_date,
+                    "load_kw": to_number(load_val), "pressure_bar": to_number(pressure_val), "status": status,
+                    "new_type": False, "note": None,
+                    "uploaded_by": current_user["full_name"], "uploaded_by_id": current_user["_id"],
+                    "created_at": datetime.utcnow(),
+                })
+    if docs:
+        pressure_readings_col.insert_many(docs)
+    return len(docs)
+
+
+def page_equipment_info(current_user):
+    st.markdown("### Motor Bilgi Kartı")
+    st.caption("Kaver tipi, hava filtresi, krankcase, eşanjör, dungs ve radyatör bilgileri — referans amaçlıdır.")
+
+    if current_user["role"] in ("yonetici", "planlamaci"):
+        with st.expander("📥 Excel'den güncelle"):
+            st.caption("'Motor No', 'Kaver Tipi', 'Hava Filtresi', 'Krankcase', 'Eşanjör Tipi', 'Dungs', 'Radyatör Tipi', 'Not' sütunlarını içeren bir dosya yükleyin. Aynı motor için var olan bilgiyi günceller.")
+            up = st.file_uploader("Excel dosyası seç", type=["xlsx"], key="eq_import_file")
+            if up is not None and st.button("İçe Aktar", key="eq_import_btn"):
+                try:
+                    updated = import_equipment_excel(up)
+                    st.success(f"{updated} motor için bilgi güncellendi.")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Dosya okunamadı: {e}")
+
+    engines = sorted(equipment_info_col.find(), key=lambda e: engine_sort_key(e["engine_name"]))
+    if not engines:
+        st.info("Henüz motor bilgisi eklenmemiş.")
+        return
+
+    query = st.text_input("Motor ara", placeholder="örn. AGM 12", key="eq_search")
+    rows = [e for e in engines if query.lower() in e["engine_name"].lower()] if query else engines
+
+    df = pd.DataFrame([{
+        "Motor": e["engine_name"], "Kaver Tipi": e.get("kaver_tipi", ""), "Hava Filtresi": e.get("hava_filtresi", ""),
+        "Krankcase": e.get("krankcase", ""), "Eşanjör Tipi": e.get("esanjor_tipi", ""),
+        "Dungs": e.get("dungs", ""), "Radyatör Tipi": e.get("radyator_tipi", ""), "Not": e.get("not", ""),
+    } for e in rows])
+    st.dataframe(df, use_container_width=True, hide_index=True, height=560)
+
+
+def import_equipment_excel(uploaded_file):
+    from openpyxl import load_workbook
+    wb = load_workbook(uploaded_file, data_only=True)
+    ws = wb[wb.sheetnames[0]]
+
+    def norm(name):
+        s = str(name).strip().replace("-", " ")
+        return " ".join(s.split())
+
+    headers = {}
+    for c in range(1, 10):
+        v = ws.cell(1, c).value
+        if v:
+            headers[str(v).strip().upper()] = c
+
+    col_map = {
+        "kaver_tipi": headers.get("KAVER TİPİ"), "hava_filtresi": headers.get("HAVA FİLTRESİ"),
+        "krankcase": headers.get("KRANKCASE"), "esanjor_tipi": headers.get("EŞANJÖR TİPİ"),
+        "dungs": headers.get("DUNGS"), "radyator_tipi": headers.get("RADYATÖR TİPİ"), "not": headers.get("NOT"),
+    }
+    motor_col = headers.get("MOTOR NO")
+    if not motor_col:
+        raise ValueError("'Motor No' sütunu bulunamadı")
+
+    updated = 0
+    for r in range(2, ws.max_row + 1):
+        name_raw = ws.cell(r, motor_col).value
+        if not name_raw or "AGM" not in str(name_raw).upper():
+            continue
+        name = norm(name_raw)
+        info = {"engine_name": name}
+        for key, col in col_map.items():
+            if col:
+                info[key] = ws.cell(r, col).value
+        equipment_info_col.update_one({"_id": name}, {"$set": info}, upsert=True)
+        updated += 1
+    return updated
 
 
 def page_users(current_user):
@@ -746,7 +1080,8 @@ else:
         st.divider()
 
         pages = ["📊 Özet", "⏱️ Saat Güncelle", "⚙️ Motorlar", "🔧 Bakım Türleri",
-                 "✅ Bakım Tamamla", "🧪 Yağ Analizleri", "📜 Bakım Kayıtları",
+                 "✅ Bakım Tamamla", "🧪 Yağ Analizleri", "📉 Karter Fark Basıncı",
+                 "📋 Motor Bilgi Kartı", "📜 Bakım Kayıtları",
                  "📈 Saat Geçmişi", "📊 Bakım Aralıkları", "📥 Excel"]
         if user["role"] == "yonetici":
             pages.append("👥 Kullanıcılar")
@@ -767,8 +1102,12 @@ else:
         page_complete_maintenance(user)
     elif choice == "🧪 Yağ Analizleri":
         page_oil_analyses(user)
+    elif choice == "📉 Karter Fark Basıncı":
+        page_pressure_readings(user)
+    elif choice == "📋 Motor Bilgi Kartı":
+        page_equipment_info(user)
     elif choice == "📜 Bakım Kayıtları":
-        page_records()
+        page_records(user)
     elif choice == "📈 Saat Geçmişi":
         page_hours_history()
     elif choice == "📊 Bakım Aralıkları":
