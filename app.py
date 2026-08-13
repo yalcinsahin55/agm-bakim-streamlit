@@ -553,7 +553,7 @@ def page_dashboard():
                 unit = "SAAT GECİKME" if status_key == "gecikmis" else "SAAT KALDI"
                 card_rows = [{
                     "title": i["engine_name"],
-                    "subtitle": f"Motor saati {i['engine_hours']:,.0f} sa · Son bakım {i['last_hour']:,.0f} sa",
+                    "subtitle": f"Motor saati {i['engine_hours']:,.0f} sa · Son bakım {i['last_hour']:,.0f} sa · Çalışılan {i['engine_hours']-i['last_hour']:,.0f} sa",
                     "status": i["status"], "remaining": i["remaining"], "period": i["period"],
                     "value_label": ("+" if i["remaining"] <= 0 else "") + f"{abs(i['remaining']):,.0f}",
                     "unit_label": unit, "badge_name": i["engine_name"],
@@ -584,7 +584,7 @@ def page_dashboard():
 
     card_rows = [{
         "title": r["engine_name"],
-        "subtitle": f"{r['type_label']} · {r['engine_hours']:,.0f} sa motor saati",
+        "subtitle": f"{r['type_label']} · {r['engine_hours']:,.0f} sa motor saati · Çalışılan {r['engine_hours']-r['last_hour']:,.0f} sa",
         "status": r["status"], "remaining": r["remaining"], "period": r["period"],
         "value_label": ("+" if r["remaining"] <= 0 else "") + f"{abs(r['remaining']):,.0f}",
         "unit_label": "SAAT GECİKME" if r["remaining"] <= 0 else "SAAT KALDI",
@@ -673,7 +673,7 @@ def page_engines():
                 continue
             card_rows = [{
                 "title": i["type_label"],
-                "subtitle": f"Periyot {i['period']:,.0f} sa · Son bakım {i['last_hour']:,.0f} sa",
+                "subtitle": f"Periyot {i['period']:,.0f} sa · Son bakım {i['last_hour']:,.0f} sa · Çalışılan {i['engine_hours']-i['last_hour']:,.0f} sa",
                 "status": i["status"], "remaining": i["remaining"], "period": i["period"],
                 "value_label": ("+" if i["remaining"] <= 0 else "") + f"{abs(i['remaining']):,.0f}",
                 "unit_label": "SAAT GECİKME" if i["remaining"] <= 0 else "SAAT KALDI",
@@ -698,7 +698,7 @@ def page_types():
 
     card_rows = [{
         "title": r["engine_name"],
-        "subtitle": f"Motor saati {r['engine_hours']:,.0f} sa · Son bakım {r['last_hour']:,.0f} sa · Periyot {r['period']:,.0f} sa",
+        "subtitle": f"Motor saati {r['engine_hours']:,.0f} sa · Son bakım {r['last_hour']:,.0f} sa · Periyot {r['period']:,.0f} sa · Çalışılan {r['engine_hours']-r['last_hour']:,.0f} sa",
         "status": r["status"], "remaining": r["remaining"], "period": r["period"],
         "value_label": ("+" if r["remaining"] <= 0 else "") + f"{abs(r['remaining']):,.0f}",
         "unit_label": "SAAT GECİKME" if r["remaining"] <= 0 else "SAAT KALDI",
@@ -1081,7 +1081,7 @@ def page_maintenance_forecast():
             daily_str = "yetersiz veri"
         forecast_rows.append({
             "title": r["engine_name"],
-            "subtitle": f"{r['type_label']} · {daily_str}",
+            "subtitle": f"{r['type_label']} · Kalan {r['remaining']:,.0f} sa · {daily_str}",
             "status": r["status"], "remaining": r["remaining"], "period": r["period"],
             "value_label": est_date_str, "unit_label": "TAHMİNİ TARİH",
             "badge_name": r["engine_name"], "_sort": sort_key,
