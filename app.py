@@ -280,6 +280,77 @@ def style_status_df(df):
     return map_fn(_color, subset=["Durum"])
 
 
+def _gauge_ring_svg(remaining, period, color, size=44):
+    import math
+    r = size / 2 - 4
+    circumference = 2 * math.pi * r
+    pct = max(0.0, min(1.0, remaining / period)) if period else 0.0
+    dash = circumference * pct
+    return (
+        f'<svg width="{size}" height="{size}" style="flex-shrink:0;">'
+        f'<circle cx="{size/2}" cy="{size/2}" r="{r}" fill="none" stroke="#2a323c" stroke-width="4"/>'
+        f'<circle cx="{size/2}" cy="{size/2}" r="{r}" fill="none" stroke="{color}" stroke-width="4" '
+        f'stroke-dasharray="{circumference:.1f}" stroke-dashoffset="{circumference-dash:.1f}" '
+        f'stroke-linecap="round" transform="rotate(-90 {size/2} {size/2})"/></svg>'
+    )
+
+
+def _engine_badge_html(name, size=32):
+    num = engine_sort_key(name)
+    fs = round(size * 0.36)
+    return (
+        f'<div style="width:{size}px;height:{size}px;border-radius:9px;display:flex;align-items:center;'
+        f'justify-content:center;background:linear-gradient(155deg,#232d3a,#171d25);border:1px solid var(--border);'
+        f'font-family:\'JetBrains Mono\',monospace;font-weight:700;font-size:{fs}px;color:var(--amber);flex-shrink:0;">{num}</div>'
+    )
+
+
+def render_gauge_cards(rows):
+    """rows: title, subtitle, status, remaining, period, value_label, unit_label, badge_name (opsiyonel) içeren sözlük listesi.
+    Her satırı gösterge halkalı, durum renkli bir kart olarak çizer — mouse ile kaydırmaya gerek kalmadan tümü tek seferde görünür."""
+    if not rows:
+        st.info("Kayıt bulunamadı.")
+        return
+    html = '<div style="display:flex;flex-direction:column;gap:7px;">'
+    for r in rows:
+        color = STATUS_COLORS[r["status"]]
+        ring = _gauge_ring_svg(r["remaining"], r["period"], color)
+        badge = _engine_badge_html(r["badge_name"]) if r.get("badge_name") else ""
+        pill = f'<span class="status-pill {r["status"]}" style="margin-top:5px;">{STATUS_LABELS[r["status"]]}</span>'
+        html += f'''
+        <div style="display:flex;align-items:center;gap:12px;background:var(--panel);border:1px solid var(--border);
+                    border-radius:14px;padding:11px 12px;">
+          {badge}{ring}
+          <div style="flex:1;min-width:0;">
+            <div style="font-size:13px;font-weight:700;color:var(--text);">{r['title']}</div>
+            <div style="font-size:11px;color:var(--faint);margin-top:2px;">{r['subtitle']}</div>
+            {pill}
+          </div>
+          <div style="text-align:right;flex-shrink:0;">
+            <div class="mono-num" style="font-size:14px;color:{color};">{r['value_label']}</div>
+            <div style="font-size:9px;color:var(--faint);letter-spacing:.3px;">{r['unit_label']}</div>
+          </div>
+        </div>'''
+    html += '</div>'
+    st.markdown(html, unsafe_allow_html=True)
+
+
+def render_load_cards(engines_list):
+    """Motor yükü kartlarını yatay kaydırmalı bir şerit olarak çizer."""
+    html = '<div style="display:flex;gap:8px;overflow-x:auto;padding-bottom:10px;">'
+    for e in engines_list:
+        html += f'''
+        <div style="display:flex;flex-direction:column;align-items:center;gap:5px;flex-shrink:0;width:74px;
+                    padding:10px 6px;border-radius:12px;background:var(--panel);border:1px solid var(--border);">
+          {_engine_badge_html(e["name"], size=28)}
+          <span style="font-size:10px;color:var(--muted);font-weight:600;">{e["name"]}</span>
+          <span class="mono-num" style="font-size:13px;color:var(--teal);">{e.get("load_kw",0):,.0f}</span>
+          <span style="font-size:8px;color:var(--faint);letter-spacing:.3px;">kW</span>
+        </div>'''
+    html += '</div>'
+    st.markdown(html, unsafe_allow_html=True)
+
+
 def estimate_daily_usage(engine_doc):
     """Motorun geçmiş çalışma saati kayıtlarından günlük ortalama kullanım (saat/gün) hesaplar."""
     if not engine_doc:
@@ -479,15 +550,15 @@ def page_dashboard():
                                           ["Seçiniz..."] + type_labels, key=f"detail_{status_key}")
             if detail_choice != "Seçiniz...":
                 detail_items = sorted(by_type[detail_choice], key=lambda i: i["remaining"])
-                value_col = "Gecikme (Saat)" if status_key == "gecikmis" else "Kalan Saat"
-                detail_df = pd.DataFrame([{
-                    "Motor": i["engine_name"], "Motor Saati": i["engine_hours"],
-                    "Son Bakım Saati": i["last_hour"],
-                    "Bakımdan Sonra Çalışılan": round(i["engine_hours"] - i["last_hour"], 1),
-                    value_col: round(abs(i["remaining"]), 1),
-                } for i in detail_items])
-                st.dataframe(style_status_df(detail_df), use_container_width=True, hide_index=True,
-                             height=min(35 * (len(detail_df) + 1) + 3, 900))
+                unit = "SAAT GECİKME" if status_key == "gecikmis" else "SAAT KALDI"
+                card_rows = [{
+                    "title": i["engine_name"],
+                    "subtitle": f"Motor saati {i['engine_hours']:,.0f} sa · Son bakım {i['last_hour']:,.0f} sa",
+                    "status": i["status"], "remaining": i["remaining"], "period": i["period"],
+                    "value_label": ("+" if i["remaining"] <= 0 else "") + f"{abs(i['remaining']):,.0f}",
+                    "unit_label": unit, "badge_name": i["engine_name"],
+                } for i in detail_items]
+                render_gauge_cards(card_rows)
 
     st.markdown("### Motor Yükleri")
     load_rows = sorted(engines.values(), key=lambda e: engine_sort_key(e["name"]))
@@ -496,8 +567,7 @@ def page_dashboard():
     lc1, lc2 = st.columns(2)
     lc1.metric("Toplam Yük", f"{total_load:,.0f} kW")
     lc2.metric("Ortalama Yük", f"{avg_load:,.0f} kW")
-    load_df = pd.DataFrame([{"Motor": e["name"], "Yük (kW)": e.get("load_kw", 0), "Çalışma Saati": e["hours"]} for e in load_rows])
-    st.dataframe(load_df, use_container_width=True, hide_index=True, height=220)
+    render_load_cards(load_rows)
 
     st.markdown("### Bakım Türüne Göre Görüntüle")
     type_options = ["Tümü"] + sorted({i["type_label"] for i in items})
@@ -512,18 +582,15 @@ def page_dashboard():
         rows = [i for i in rows if i["status"] == filter_map[status_choice]]
     rows = sorted(rows, key=lambda i: i["remaining"])
 
-    if not rows:
-        st.info("Kayıt bulunamadı.")
-        return
-
-    df = pd.DataFrame([{
-        "Motor": r["engine_name"], "Bakım Türü": r["type_label"],
-        "Motor Saati": r["engine_hours"], "Son Bakım Saati": r["last_hour"],
-        "Bakımdan Sonra Çalışılan": round(r["engine_hours"] - r["last_hour"], 1),
-        "Kalan Saat": round(r["remaining"], 1), "Durum": STATUS_LABELS[r["status"]],
-    } for r in rows])
-    height = min(35 * (len(df) + 1) + 3, 1600)
-    st.dataframe(style_status_df(df), use_container_width=True, hide_index=True, height=height)
+    card_rows = [{
+        "title": r["engine_name"],
+        "subtitle": f"{r['type_label']} · {r['engine_hours']:,.0f} sa motor saati",
+        "status": r["status"], "remaining": r["remaining"], "period": r["period"],
+        "value_label": ("+" if r["remaining"] <= 0 else "") + f"{abs(r['remaining']):,.0f}",
+        "unit_label": "SAAT GECİKME" if r["remaining"] <= 0 else "SAAT KALDI",
+        "badge_name": r["engine_name"],
+    } for r in rows]
+    render_gauge_cards(card_rows)
 
 
 def page_hours_update():
@@ -604,13 +671,14 @@ def page_engines():
             if not r["items"]:
                 st.caption("Bu motor için tanımlı bakım türü yok.")
                 continue
-            df = pd.DataFrame([{
-                "Bakım Türü": i["type_label"], "Son Bakım Saati": i["last_hour"], "Periyot": i["period"],
-                "Bakımdan Sonra Çalışılan": round(i["engine_hours"] - i["last_hour"], 1),
-                "Kalan Saat": round(i["remaining"], 1), "Durum": STATUS_LABELS[i["status"]],
-            } for i in r["items"]])
-            st.dataframe(style_status_df(df), use_container_width=True, hide_index=True,
-                         height=min(35 * (len(df) + 1) + 3, 900))
+            card_rows = [{
+                "title": i["type_label"],
+                "subtitle": f"Periyot {i['period']:,.0f} sa · Son bakım {i['last_hour']:,.0f} sa",
+                "status": i["status"], "remaining": i["remaining"], "period": i["period"],
+                "value_label": ("+" if i["remaining"] <= 0 else "") + f"{abs(i['remaining']):,.0f}",
+                "unit_label": "SAAT GECİKME" if i["remaining"] <= 0 else "SAAT KALDI",
+            } for i in r["items"]]
+            render_gauge_cards(card_rows)
 
 
 def page_types():
@@ -628,16 +696,15 @@ def page_types():
         rows = [r for r in rows if r["status"] == filter_map[status_filter]]
     rows.sort(key=lambda r: r["remaining"])
 
-    if not rows:
-        st.info("Kayıt bulunamadı.")
-        return
-
-    df = pd.DataFrame([{
-        "Motor": r["engine_name"], "Motor Saati": r["engine_hours"], "Son Bakım Saati": r["last_hour"],
-        "Periyot": r["period"], "Bakımdan Sonra Çalışılan": round(r["engine_hours"] - r["last_hour"], 1),
-        "Kalan Saat": round(r["remaining"], 1), "Durum": STATUS_LABELS[r["status"]],
-    } for r in rows])
-    st.dataframe(style_status_df(df), use_container_width=True, hide_index=True, height=min(35 * (len(df) + 1) + 3, 1200))
+    card_rows = [{
+        "title": r["engine_name"],
+        "subtitle": f"Motor saati {r['engine_hours']:,.0f} sa · Son bakım {r['last_hour']:,.0f} sa · Periyot {r['period']:,.0f} sa",
+        "status": r["status"], "remaining": r["remaining"], "period": r["period"],
+        "value_label": ("+" if r["remaining"] <= 0 else "") + f"{abs(r['remaining']):,.0f}",
+        "unit_label": "SAAT GECİKME" if r["remaining"] <= 0 else "SAAT KALDI",
+        "badge_name": r["engine_name"],
+    } for r in rows]
+    render_gauge_cards(card_rows)
 
 
 def compress_photo(uploaded_file, max_dim=720, quality=65):
@@ -1007,20 +1074,20 @@ def page_maintenance_forecast():
             est_date = date.today() + timedelta(days=days_left)
             est_date_str = est_date.strftime("%d.%m.%Y")
             sort_key = days_left
+            daily_str = f"{daily:,.1f} sa/gün"
         else:
-            est_date_str = "Tahmin edilemiyor (yetersiz veri)"
+            est_date_str = "Tahmin edilemiyor"
             sort_key = 10**9
+            daily_str = "yetersiz veri"
         forecast_rows.append({
-            "Motor": r["engine_name"], "Bakım Türü": r["type_label"],
-            "Kalan Saat": round(r["remaining"], 1),
-            "Günlük Ort. Kullanım (sa)": round(daily, 1) if daily else "-",
-            "Tahmini Bakım Tarihi": est_date_str, "Durum": STATUS_LABELS[r["status"]],
-            "_sort": sort_key,
+            "title": r["engine_name"],
+            "subtitle": f"{r['type_label']} · {daily_str}",
+            "status": r["status"], "remaining": r["remaining"], "period": r["period"],
+            "value_label": est_date_str, "unit_label": "TAHMİNİ TARİH",
+            "badge_name": r["engine_name"], "_sort": sort_key,
         })
     forecast_rows.sort(key=lambda r: r["_sort"])
-    df = pd.DataFrame(forecast_rows).drop(columns=["_sort"])
-    height = min(35 * (len(df) + 1) + 3, 1600)
-    st.dataframe(style_status_df(df), use_container_width=True, hide_index=True, height=height)
+    render_gauge_cards(forecast_rows)
 
 
 def page_hours_history():
