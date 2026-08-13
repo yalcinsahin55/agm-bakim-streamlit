@@ -25,6 +25,94 @@ STATUS_COLORS = {"gecikmis": "#ef4a52", "kritik": "#f2994a", "yaklasiyor": "#f0c
 ROLES = ["yonetici", "planlamaci", "teknisyen", "goruntuleyici"]
 ROLE_LABELS = {"yonetici": "Yönetici", "planlamaci": "Planlamacı", "teknisyen": "Teknisyen", "goruntuleyici": "Görüntüleyici"}
 
+# ============================================================
+# Görsel tema — grafit zemin, amber/teal vurgu, endüstriyel tipografi
+# ============================================================
+st.markdown("""
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Barlow+Condensed:wght@600;700&family=JetBrains+Mono:wght@500;600;700&display=swap');
+
+:root{
+  --bg:#0f1319; --panel:#171d25; --panel2:#1f2730; --border:#2a323c; --border-lt:#374252;
+  --text:#eef1f5; --muted:#8b96a3; --faint:#5b6572;
+  --amber:#e8952f; --amber-soft:rgba(232,149,47,.14);
+  --teal:#3fb5c4; --teal-soft:rgba(63,181,196,.14);
+  --red:#ef4a52; --orange:#f2994a; --yellow:#f0c93d; --green:#33c98a;
+}
+
+html, body, [class*="css"]{ font-family:'Inter',sans-serif; }
+.stApp{ background:radial-gradient(circle at 20% 0%, #141a22 0%, #0f1319 55%); color:var(--text); }
+
+/* Streamlit varsayılan üst şerit / footer'ı sadeleştir */
+#MainMenu{ visibility:hidden; }
+footer{ visibility:hidden; }
+header[data-testid="stHeader"]{ background:transparent; }
+
+/* Başlıklar */
+h1, h2, h3{ font-family:'Barlow Condensed',sans-serif !important; text-transform:uppercase; letter-spacing:.4px; color:var(--text) !important; }
+h3{ font-size:19px !important; font-weight:700 !important; border-bottom:1px solid var(--border); padding-bottom:8px; margin-bottom:14px !important;}
+
+/* Sidebar */
+section[data-testid="stSidebar"]{ background:#12161d; border-right:1px solid var(--border); }
+section[data-testid="stSidebar"] .stRadio label{
+  padding:9px 12px; border-radius:10px; margin-bottom:2px; font-weight:600; font-size:13.5px;
+}
+section[data-testid="stSidebar"] .stRadio [data-baseweb="radio"]{ display:none; }
+section[data-testid="stSidebar"] .stRadio label:has(input:checked){
+  background:var(--amber-soft); color:var(--amber) !important; border:1px solid rgba(232,149,47,.35);
+}
+
+/* Kartlar / container'lar */
+div[data-testid="stVerticalBlockBorderWrapper"]{
+  background:var(--panel); border:1px solid var(--border) !important; border-radius:14px;
+}
+div[data-testid="stExpander"]{ background:var(--panel); border:1px solid var(--border); border-radius:14px; overflow:hidden;}
+div[data-testid="stExpander"] summary{ font-weight:700; font-size:13.5px; }
+
+/* Metric */
+div[data-testid="stMetric"]{
+  background:var(--panel); border:1px solid var(--border); border-radius:14px; padding:12px 14px;
+}
+div[data-testid="stMetricValue"]{ font-family:'JetBrains Mono',monospace !important; color:var(--amber) !important; }
+div[data-testid="stMetricLabel"]{ color:var(--muted) !important; font-size:11.5px !important; text-transform:uppercase; letter-spacing:.4px; }
+
+/* Butonlar */
+.stButton button{
+  border-radius:10px !important; font-weight:700 !important; border:1px solid var(--border-lt) !important;
+  background:var(--panel2) !important; color:var(--text) !important;
+}
+.stButton button[kind="primary"]{
+  background:linear-gradient(180deg,#f0a23f,#e8952f) !important; color:#1a1206 !important; border:none !important;
+  box-shadow:0 6px 18px rgba(232,149,47,.28);
+}
+.stDownloadButton button{ border-radius:10px !important; font-weight:700 !important; }
+
+/* Input alanları */
+.stTextInput input, .stTextArea textarea, .stNumberInput input, .stDateInput input{
+  background:var(--panel2) !important; color:var(--text) !important; border:1px solid var(--border) !important; border-radius:10px !important;
+}
+div[data-baseweb="select"] > div{ background:var(--panel2) !important; border-color:var(--border) !important; border-radius:10px !important; }
+
+/* Sekmeler */
+.stTabs [data-baseweb="tab-list"]{ gap:4px; background:#12161d; padding:4px; border-radius:10px; border:1px solid var(--border);}
+.stTabs [data-baseweb="tab"]{ border-radius:8px; font-weight:700; font-size:12.5px; color:var(--faint); }
+.stTabs [aria-selected="true"]{ background:var(--amber) !important; color:#161006 !important; }
+
+/* Dataframe / tablo */
+div[data-testid="stDataFrame"]{ border-radius:12px; overflow:hidden; border:1px solid var(--border); }
+
+/* JetBrains Mono ile sayısal hislendirme için yardımcı sınıf */
+.mono-num{ font-family:'JetBrains Mono',monospace; font-weight:700; }
+
+/* Durum rozeti (özel HTML kartlarda kullanılır) */
+.status-pill{ display:inline-flex; align-items:center; gap:5px; padding:3px 10px; border-radius:999px; font-size:11px; font-weight:800; }
+.status-pill.gecikmis{ background:rgba(239,74,82,.14); color:var(--red); }
+.status-pill.kritik{ background:rgba(242,153,74,.14); color:var(--orange); }
+.status-pill.yaklasiyor{ background:rgba(240,201,61,.14); color:var(--yellow); }
+.status-pill.normal{ background:rgba(51,201,138,.14); color:var(--green); }
+</style>
+""", unsafe_allow_html=True)
+
 
 # ============================================================
 # Veritabanı bağlantısı
@@ -174,6 +262,22 @@ def build_items():
 def engine_sort_key(name):
     digits = "".join(ch for ch in name if ch.isdigit())
     return int(digits) if digits else 0
+
+
+def style_status_df(df):
+    """DataFrame'de 'Durum' sütunu varsa, hücreleri gecikmiş/kritik/yaklaşıyor/normal
+    renklerine göre boyayan bir Styler döndürür. Yoksa DataFrame'i olduğu gibi bırakır."""
+    if "Durum" not in df.columns:
+        return df
+    color_map = {label: STATUS_COLORS[key] for key, label in STATUS_LABELS.items()}
+
+    def _color(val):
+        c = color_map.get(val)
+        return f"color:{c}; font-weight:700;" if c else ""
+
+    styler = df.style
+    map_fn = getattr(styler, "map", None) or styler.applymap
+    return map_fn(_color, subset=["Durum"])
 
 
 def estimate_daily_usage(engine_doc):
@@ -332,8 +436,28 @@ def login_view():
 # ============================================================
 # Sayfalar
 # ============================================================
+def render_stat_cards(counts):
+    order = [("gecikmis", "Gecikmiş"), ("kritik", "Kritik"), ("yaklasiyor", "Yaklaşıyor"), ("normal", "Normal")]
+    cards = ""
+    for key, label in order:
+        color = STATUS_COLORS[key]
+        cards += f"""
+        <div style="background:var(--panel); border:1px solid var(--border); border-radius:14px;
+                    padding:13px 14px; position:relative; overflow:hidden; flex:1; min-width:110px;">
+          <div style="position:absolute; top:0; left:0; width:3px; height:100%; background:{color};"></div>
+          <div style="font-size:10.5px; font-weight:700; letter-spacing:.5px; color:var(--muted); text-transform:uppercase;">{label}</div>
+          <div style="font-family:'JetBrains Mono',monospace; font-size:26px; font-weight:700; margin-top:4px; color:{color};">{counts[key]}</div>
+        </div>"""
+    st.markdown(f'<div style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:6px;">{cards}</div>', unsafe_allow_html=True)
+
+
 def page_dashboard():
     items, engines, types = build_items()
+
+    counts = {"gecikmis": 0, "kritik": 0, "yaklasiyor": 0, "normal": 0}
+    for i in items:
+        counts[i["status"]] += 1
+    render_stat_cards(counts)
 
     st.markdown("### Bakım Bildirimleri")
     for status_key, header in [("gecikmis", "🔴 Gecikmiş"), ("kritik", "🟠 Kritik"), ("yaklasiyor", "🟡 Yaklaşıyor")]:
@@ -362,11 +486,8 @@ def page_dashboard():
                     "Bakımdan Sonra Çalışılan": round(i["engine_hours"] - i["last_hour"], 1),
                     value_col: round(abs(i["remaining"]), 1),
                 } for i in detail_items])
-                st.dataframe(detail_df, use_container_width=True, hide_index=True,
+                st.dataframe(style_status_df(detail_df), use_container_width=True, hide_index=True,
                              height=min(35 * (len(detail_df) + 1) + 3, 900))
-
-    normal_count = len([i for i in items if i["status"] == "normal"])
-    st.caption(f"🟢 Normal: {normal_count} bakım kaydı")
 
     st.markdown("### Motor Yükleri")
     load_rows = sorted(engines.values(), key=lambda e: engine_sort_key(e["name"]))
@@ -402,7 +523,7 @@ def page_dashboard():
         "Kalan Saat": round(r["remaining"], 1), "Durum": STATUS_LABELS[r["status"]],
     } for r in rows])
     height = min(35 * (len(df) + 1) + 3, 1600)
-    st.dataframe(df, use_container_width=True, hide_index=True, height=height)
+    st.dataframe(style_status_df(df), use_container_width=True, hide_index=True, height=height)
 
 
 def page_hours_update():
@@ -488,7 +609,7 @@ def page_engines():
                 "Bakımdan Sonra Çalışılan": round(i["engine_hours"] - i["last_hour"], 1),
                 "Kalan Saat": round(i["remaining"], 1), "Durum": STATUS_LABELS[i["status"]],
             } for i in r["items"]])
-            st.dataframe(df, use_container_width=True, hide_index=True,
+            st.dataframe(style_status_df(df), use_container_width=True, hide_index=True,
                          height=min(35 * (len(df) + 1) + 3, 900))
 
 
@@ -516,7 +637,7 @@ def page_types():
         "Periyot": r["period"], "Bakımdan Sonra Çalışılan": round(r["engine_hours"] - r["last_hour"], 1),
         "Kalan Saat": round(r["remaining"], 1), "Durum": STATUS_LABELS[r["status"]],
     } for r in rows])
-    st.dataframe(df, use_container_width=True, hide_index=True, height=min(35 * (len(df) + 1) + 3, 1200))
+    st.dataframe(style_status_df(df), use_container_width=True, hide_index=True, height=min(35 * (len(df) + 1) + 3, 1200))
 
 
 def compress_photo(uploaded_file, max_dim=720, quality=65):
@@ -899,7 +1020,7 @@ def page_maintenance_forecast():
     forecast_rows.sort(key=lambda r: r["_sort"])
     df = pd.DataFrame(forecast_rows).drop(columns=["_sort"])
     height = min(35 * (len(df) + 1) + 3, 1600)
-    st.dataframe(df, use_container_width=True, hide_index=True, height=height)
+    st.dataframe(style_status_df(df), use_container_width=True, hide_index=True, height=height)
 
 
 def page_hours_history():
