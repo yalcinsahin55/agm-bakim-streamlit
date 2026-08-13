@@ -351,29 +351,6 @@ def render_load_cards(engines_list):
     st.markdown(html, unsafe_allow_html=True)
 
 
-def estimate_daily_usage(engine_doc):
-    """Motorun geçmiş çalışma saati kayıtlarından günlük ortalama kullanım (saat/gün) hesaplar."""
-    if not engine_doc:
-        return None
-    history = engine_doc.get("history", [])
-    if len(history) < 2:
-        return None
-    try:
-        history_sorted = sorted(history, key=lambda h: h["date"])
-        first, last = history_sorted[0], history_sorted[-1]
-        first_dt = datetime.fromisoformat(first["date"])
-        last_dt = datetime.fromisoformat(last["date"])
-        span_days = (last_dt - first_dt).total_seconds() / 86400
-        if span_days < 0.5:
-            return None
-        delta_hours = last["hours"] - first["hours"]
-        if delta_hours <= 0:
-            return None
-        return delta_hours / span_days
-    except Exception:
-        return None
-
-
 def delete_button(collection, doc_id, key_suffix, current_user, owner_id=None, on_delete=None):
     """Silme yetkisi: yönetici/planlamacı her kaydı, diğer roller yalnızca
     kendi oluşturdukları kaydı silebilir. İki adımlı onay ister."""
@@ -1055,7 +1032,7 @@ def edit_maintenance_record(r, current_photos):
 def page_maintenance_forecast():
     items, engines, types = build_items()
     st.markdown("### Bakım Tarihi Tahmini")
-    st.caption("Motorun geçmiş çalışma saati kayıtlarından günlük ortalama kullanım hesaplanır; bu hıza göre bakımın hangi takvim tarihinde geleceği tahmin edilir. En az iki farklı tarihte saat kaydı olan motorlar için tahmin yapılabilir.")
+    st.caption("En kötü senaryo (en güvenli tahmin) olarak, tüm motorların günde 24 saat kesintisiz çalıştığı varsayılarak bakımın hangi takvim tarihinde geleceği hesaplanır. Bu, gerçek kullanım daha düşük olsa bile bakımın asla gözden kaçmamasını sağlar.")
 
     type_options = ["Tümü"] + sorted({i["type_label"] for i in items})
     type_choice = st.selectbox("Bakım türü seç", type_options, key="forecast_type")
@@ -1065,26 +1042,18 @@ def page_maintenance_forecast():
         st.info("Kayıt bulunamadı.")
         return
 
+    MAX_DAILY_HOURS = 24
     forecast_rows = []
     for r in rows:
-        engine_doc = engines.get(r["engine_id"])
-        daily = estimate_daily_usage(engine_doc)
-        if daily and daily > 0:
-            days_left = r["remaining"] / daily
-            est_date = date.today() + timedelta(days=days_left)
-            est_date_str = est_date.strftime("%d.%m.%Y")
-            sort_key = days_left
-            daily_str = f"{daily:,.1f} sa/gün"
-        else:
-            est_date_str = "Tahmin edilemiyor"
-            sort_key = 10**9
-            daily_str = "yetersiz veri"
+        days_left = r["remaining"] / MAX_DAILY_HOURS
+        est_date = date.today() + timedelta(days=days_left)
+        est_date_str = est_date.strftime("%d.%m.%Y")
         forecast_rows.append({
             "title": r["engine_name"],
-            "subtitle": f"{r['type_label']} · Kalan {r['remaining']:,.0f} sa · {daily_str}",
+            "subtitle": f"{r['type_label']} · Kalan {r['remaining']:,.0f} sa · 24 sa/gün varsayımıyla",
             "status": r["status"], "remaining": r["remaining"], "period": r["period"],
-            "value_label": est_date_str, "unit_label": "TAHMİNİ TARİH",
-            "badge_name": r["engine_name"], "_sort": sort_key,
+            "value_label": est_date_str, "unit_label": "EN GEÇ BAKIM TARİHİ",
+            "badge_name": r["engine_name"], "_sort": days_left,
         })
     forecast_rows.sort(key=lambda r: r["_sort"])
     render_gauge_cards(forecast_rows)
