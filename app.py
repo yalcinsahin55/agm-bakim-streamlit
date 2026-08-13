@@ -534,6 +534,23 @@ def compress_photo(uploaded_file, max_dim=720, quality=65):
     return base64.b64encode(buf.getvalue()).decode("utf-8")
 
 
+MAX_VIDEO_MB = 15
+VIDEO_MIME_MAP = {"mp4": "video/mp4", "mov": "video/quicktime", "webm": "video/webm",
+                   "m4v": "video/mp4", "avi": "video/x-msvideo"}
+
+
+def encode_video(uploaded_file):
+    """Videoyu base64'e çevirir. Video sıkıştırma yapılmaz (ek kütüphane
+    gerektirir) — bu yüzden boyut sınırı MongoDB'nin belge başına 16MB
+    limitine göre belirlenmiştir. Sınırı aşan dosyalar reddedilir."""
+    if uploaded_file.size > MAX_VIDEO_MB * 1024 * 1024:
+        return None, f"'{uploaded_file.name}' dosyası {MAX_VIDEO_MB}MB sınırını aşıyor, eklenmedi. Daha kısa bir klip deneyin."
+    ext = uploaded_file.name.rsplit(".", 1)[-1].lower() if "." in uploaded_file.name else "mp4"
+    mime = VIDEO_MIME_MAP.get(ext, "video/mp4")
+    data_b64 = base64.b64encode(uploaded_file.read()).decode("utf-8")
+    return {"data_b64": data_b64, "filename": uploaded_file.name, "mime": mime}, None
+
+
 def page_complete_maintenance(current_user):
     if current_user["role"] == "goruntuleyici":
         st.warning("Görüntüleyici rolü bakım tamamlayamaz.")
@@ -601,6 +618,8 @@ def page_complete_maintenance(current_user):
     photos = st.file_uploader("Fotoğraf ekle (opsiyonel, birden fazla seçebilirsiniz)",
                                type=["jpg", "jpeg", "png", "webp"], accept_multiple_files=True)
     camera_photo = st.camera_input("Ya da doğrudan fotoğraf çek (opsiyonel)")
+    videos = st.file_uploader(f"Video ekle (opsiyonel, kısa klipler — her biri en fazla {MAX_VIDEO_MB}MB)",
+                               type=["mp4", "mov", "webm", "m4v"], accept_multiple_files=True)
 
     st.markdown("---")
     other_items = [i for i in eng_items if i["type_key"] != chosen_key]
@@ -622,11 +641,20 @@ def page_complete_maintenance(current_user):
             except Exception:
                 st.warning("Bir fotoğraf işlenemedi, atlandı.")
 
+        videos_data = []
+        for v in (videos or []):
+            encoded, err = encode_video(v)
+            if err:
+                st.warning(err)
+            elif encoded:
+                videos_data.append(encoded)
+
         record_datetime = datetime.combine(record_date, datetime.now().time())
         record = {
             "engine_id": engine_name, "engine_name": engine_name,
             "type_key": chosen_key, "type_label": chosen_type["label"],
-            "hour_at_completion": record_hours, "note": note, "technician_note": tech_note, "photos_b64": photos_b64,
+            "hour_at_completion": record_hours, "note": note, "technician_note": tech_note,
+            "photos_b64": photos_b64, "videos": videos_data,
             "technician_id": current_user["_id"], "technician_name": current_user["full_name"],
             "created_at": record_datetime, "backdated": backdated,
         }
@@ -652,7 +680,7 @@ def page_complete_maintenance(current_user):
                 "engine_id": engine_name, "engine_name": engine_name,
                 "type_key": extra["type_key"], "type_label": extra["type_label"],
                 "hour_at_completion": record_hours, "note": note, "technician_note": tech_note,
-                "photos_b64": photos_b64,
+                "photos_b64": photos_b64, "videos": videos_data,
                 "technician_id": current_user["_id"], "technician_name": current_user["full_name"],
                 "created_at": record_datetime, "backdated": backdated,
                 "grouped_with": chosen_type["label"],
@@ -725,6 +753,9 @@ def page_records(current_user):
                 if r.get("technician_note"):
                     st.caption(f"🗒️ Bakımcı Notu: {r['technician_note']}")
 
+                for v in (r.get("videos") or []):
+                    st.video(base64.b64decode(v["data_b64"]), format=v.get("mime", "video/mp4"))
+
                 can_edit = current_user["role"] in ("yonetici", "planlamaci") or current_user["_id"] == r.get("technician_id")
                 bc1, bc2 = st.columns(2)
                 if can_edit:
@@ -770,6 +801,21 @@ def edit_maintenance_record(r, current_photos):
                                    key=f"ed_upload_{r['_id']}")
     new_camera = st.camera_input("Ya da doğrudan fotoğraf çek", key=f"ed_camera_{r['_id']}")
 
+    current_videos = r.get("videos") or []
+    keep_videos = list(current_videos)
+    if current_videos:
+        st.caption("Mevcut videolar — kaldırmak istediklerinizi işaretleyin")
+        keep_videos = []
+        for idx, v in enumerate(current_videos):
+            st.video(base64.b64decode(v["data_b64"]), format=v.get("mime", "video/mp4"))
+            remove = st.checkbox(f"Bu videoyu kaldır ({v.get('filename','video')})", key=f"ed_vrm_{r['_id']}_{idx}")
+            if not remove:
+                keep_videos.append(v)
+
+    new_videos = st.file_uploader(f"Yeni video ekle (opsiyonel, her biri en fazla {MAX_VIDEO_MB}MB)",
+                                   type=["mp4", "mov", "webm", "m4v"], accept_multiple_files=True,
+                                   key=f"ed_video_upload_{r['_id']}")
+
     c1, c2 = st.columns(2)
     if c1.button("Vazgeç", key=f"ed_cancel_{r['_id']}", use_container_width=True):
         st.session_state[f"edit_{r['_id']}"] = False
@@ -785,9 +831,18 @@ def edit_maintenance_record(r, current_photos):
             except Exception:
                 st.warning("Bir fotoğraf işlenemedi, atlandı.")
 
+        added_videos = []
+        for v in (new_videos or []):
+            encoded, err = encode_video(v)
+            if err:
+                st.warning(err)
+            elif encoded:
+                added_videos.append(encoded)
+
         update = {
             "hour_at_completion": new_hours, "note": new_note,
             "technician_note": new_tech_note, "photos_b64": keep_photos + added_photos,
+            "videos": keep_videos + added_videos,
         }
         if new_pressure is not None:
             update["pressure_reading"] = new_pressure
