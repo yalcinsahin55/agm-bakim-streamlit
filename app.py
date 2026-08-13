@@ -1077,16 +1077,16 @@ def page_hours_history():
     st.line_chart(df)
 
     total_delta = history[-1]["hours"] - history[0]["hours"]
-    span_days = max(1, (pd.to_datetime(history[-1]["date"]) - pd.to_datetime(history[0]["date"])).days)
+    record_count = len(history)
+
     c1, c2, c3 = st.columns(3)
     c1.metric("Toplam Artış", f"{total_delta:,.0f} sa")
-    c2.metric("Günlük Ortalama", f"{total_delta/span_days:,.1f} sa")
-    c3.metric("Kayıt Sayısı", len(history))
+    c2.metric("Ortalama Artış (Kayıt Başı)", f"{total_delta/record_count:,.1f} sa")
+    c3.metric("Kayıt Sayısı", record_count)
 
     table_df = pd.DataFrame(history)[::-1]
     table_df["date"] = pd.to_datetime(table_df["date"]).dt.strftime("%d.%m.%Y")
     st.dataframe(table_df.rename(columns={"date": "Tarih", "hours": "Saat"}), use_container_width=True, hide_index=True)
-
 
 def page_intervals():
     st.markdown("### Bakım Aralıkları")
